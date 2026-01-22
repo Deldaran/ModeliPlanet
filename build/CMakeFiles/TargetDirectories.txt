@@ -1,0 +1,4 @@
+/Users/joris/ModeliPlanet/build/CMakeFiles/ModeliPlanet.dir
+/Users/joris/ModeliPlanet/build/CMakeFiles/copy_shaders.dir
+/Users/joris/ModeliPlanet/build/CMakeFiles/edit_cache.dir
+/Users/joris/ModeliPlanet/build/CMakeFiles/rebuild_cache.dir
