@@ -1,7 +1,7 @@
 {
 	"InstallScripts" : 
 	[
-		"/Users/joris/ModeliPlanet/build/cmake_install.cmake"
+		"C:/Users/dedjo/ModeliPlanet/build/cmake_install.cmake"
 	],
 	"Parallel" : false
 }

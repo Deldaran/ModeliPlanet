@@ -9,6 +9,7 @@
 #include <algorithm>
 #include "FastNoiseLite.h"
 
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -22,7 +23,7 @@ struct Vertex {
 
 class Planet {
 public:
-    float radius = 1.0f;
+    float radius;
     std::vector<Vertex> vertices;
     std::vector<unsigned int> indices;
     unsigned int VBO, VAO, EBO;
@@ -30,13 +31,83 @@ public:
     std::vector<float> heightMap;
     int mapWidth = 512;
     int mapHeight = 256;
+    float relativeStrength = 0.0f;
 
-    Planet(float r = 1.0f) : radius(r), VAO(0), VBO(0), EBO(0) {}
+    Planet(float radius) : radius(radius), VAO(0), VBO(0), EBO(0) {}
 
     void calculateUV(Vertex& v) {
         glm::vec3 n = glm::normalize(v.position);
         v.u = 0.5f + (atan2(n.z, n.x) / (2.0f * (float)M_PI));
         v.v = 0.5f - (asin(n.y) / (float)M_PI);
+    }
+    
+    float calculateNoiseAt(glm::vec3 dir) {
+        // 1. Si la heightMap est vide, on renvoie une valeur neutre
+        if (heightMap.empty()) return 0.5f;
+
+        // 2. On transforme la direction 3D en coordonnées UV (0 à 1)
+        // C'est exactement la même projection que pour ton mesh visuel
+        glm::vec3 n = glm::normalize(dir);
+        float u = 0.5f + (atan2(n.z, n.x) / (2.0f * (float)M_PI));
+        float v = 0.5f - (asin(n.y) / (float)M_PI);
+
+        // 3. On convertit ces UV en indices de pixels dans ta heightMap
+        int x = (int)(u * (mapWidth - 1));
+        int y = (int)(v * (mapHeight - 1));
+        
+        // Sécurité pour ne pas sortir du tableau
+        x = std::clamp(x, 0, mapWidth - 1);
+        y = std::clamp(y, 0, mapHeight - 1);
+
+        // 4. On renvoie la valeur stockée dans la carte de hauteur
+        return heightMap[y * mapWidth + x];
+    }
+
+    // Échantillonnage bilinéaire de la heightMap à partir d'UV (0..1)
+    float sampleHeightMap(float u, float v) {
+        if (heightMap.empty()) return 0.5f;
+
+        u = glm::clamp(u, 0.0f, 1.0f);
+        v = glm::clamp(v, 0.0f, 1.0f);
+
+        float mapX = u * (float)(mapWidth - 1);
+        float mapY = v * (float)(mapHeight - 1);
+
+        int x0 = (int)std::floor(mapX);
+        int y0 = (int)std::floor(mapY);
+        int x1 = (x0 + 1) % mapWidth;
+        int y1 = (y0 + 1) % mapHeight;
+
+        float sx = mapX - (float)x0;
+        float sy = mapY - (float)y0;
+
+        float v00 = heightMap[y0 * mapWidth + x0];
+        float v10 = heightMap[y0 * mapWidth + x1];
+        float v01 = heightMap[y1 * mapWidth + x0];
+        float v11 = heightMap[y1 * mapWidth + x1];
+
+        float top = v00 + sx * (v10 - v00);
+        float bottom = v01 + sx * (v11 - v01);
+
+        return top + sy * (bottom - top);
+    }
+
+    float getSurfaceHeight(glm::vec3 direction) {
+        // Convertit la direction en UV, échantillonne la heightMap et renvoie le rayon réel
+        glm::vec3 n = glm::normalize(direction);
+        float u = 0.5f + (atan2(n.z, n.x) / (2.0f * (float)M_PI));
+        float v = 0.5f - (asin(n.y) / (float)M_PI);
+
+        float noiseValue = sampleHeightMap(u, v);
+
+        float displacement;
+        if (noiseValue < 0.5f) {
+            displacement = 1.0f;
+        } else {
+            displacement = 1.0f + (noiseValue - 0.5f) * this->relativeStrength;
+        }
+
+        return radius * displacement;
     }
 
     unsigned int getMiddlePoint(unsigned int p1, unsigned int p2, std::vector<Vertex>& vertices, std::map<int64_t, unsigned int>& cache) {
@@ -132,7 +203,7 @@ public:
             {-1,t,0}, {1,t,0}, {-1,-t,0}, {1,-t,0}, {0,-1,t}, {0,1,t}, {0,-1,-t}, {0,1,-t}, {t,0,-1}, {t,0,1}, {-t,0,-1}, {-t,0,1}
         };
         for(auto p : basePos) {
-            glm::vec3 n = glm::normalize(p) * radius;
+            glm::vec3 n = glm::normalize(p) * this->radius;
             vertices.push_back({n, 1.0f, 0.0f, 0.0f, glm::normalize(n)});
         }
         std::vector<unsigned int> faces = {
@@ -155,47 +226,22 @@ public:
     }
     
     void applyRectangularNoise(float strength) {
+        this->relativeStrength = strength;
         for (auto& v : vertices) {
             calculateUV(v);
 
-            // Coordonnées flottantes sur la carte
-            float mapX = v.u * (float)(mapWidth - 1);
-            float mapY = v.v * (float)(mapHeight - 1);
+            // Échantillonne la heightMap avec interpolation bilinéaire
+            float noiseValue = sampleHeightMap(v.u, v.v);
 
-            // On trouve les indices des 4 pixels voisins
-            int x0 = (int)std::floor(mapX);
-            int x1 = (x0 + 1) % mapWidth;
-            int y0 = (int)std::floor(mapY);
-            int y1 = (y0 + 1) % mapHeight;
-
-            // Facteurs d'interpolation (entre 0 et 1)
-            float sx = mapX - (float)x0;
-            float sy = mapY - (float)y0;
-
-            // Lecture des 4 valeurs
-            float v00 = heightMap[y0 * mapWidth + x0];
-            float v10 = heightMap[y0 * mapWidth + x1];
-            float v01 = heightMap[y1 * mapWidth + x0];
-            float v11 = heightMap[y1 * mapWidth + x1];
-
-            // Interpolation bilinéaire (mélange horizontal puis vertical)
-            float top = v00 + sx * (v10 - v00);
-            float bottom = v01 + sx * (v11 - v01);
-            float noiseValue = top + sy * (bottom - top);
-            
             float displacement;
-            
-            // Application du déplacement
             if (noiseValue < 0.5f) {
-                // L'océan reste une sphère parfaite à l'altitude 1.0
-                displacement = 1.0f; 
+                displacement = 1.0f;
             } else {
-                // Seule la terre ferme ( > 0.5) est surélevée
-                // On soustrait 0.5 pour que la plage commence pile à 1.0
                 displacement = 1.0f + (noiseValue - 0.5f) * strength;
             }
 
-            v.position = glm::normalize(v.position) * displacement;
+            // Appliquer le rayon correct (radius * displacement)
+            v.position = glm::normalize(v.position) * (this->radius * displacement);
             v.altitude = noiseValue;
         }
         // Indispensable pour que la lumière soit correcte sur le nouveau relief

@@ -51,10 +51,11 @@ void main() {
     float a = vAltitude;
 
     // 3. LOGIQUE DE DISTRIBUTION
-    if (a <= 0.5) {
+    if (a < 0.5) {
         // ZONE EAU (Bruit entre 0.0 et 0.5)
-        float t = smoothstep(0.0, 0.5, a);
-        color = mix(vec3(0.01, 0.05, 0.2), vec3(0.0, 0.4, 0.6), t);
+        // Utilisation d'un mélange linéaire pour garantir un seuil exact à 0.5
+        float t = a / 0.5; 
+        color = mix(deepOcean, shallowSea, clamp(t, 0.0, 1.0));
         
         // Reflet soleil sur l'eau
         vec3 reflectDir = reflect(-lightDir, norm);
