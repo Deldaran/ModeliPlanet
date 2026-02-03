@@ -37,7 +37,7 @@ float planetAngularSpeed = 0.0005f;
 
 glm::vec3 lastPlanetPos(0.0f);
 float baseCameraSpeed = 5.0f; // Vitesse de caméra augmentée pour échelle géante
-float playerHeight = 0.01f; // hauteur du joueur au-dessus du sol
+float playerHeight = 1.6f; // Hauteur du joueur corrigée pour ne pas traverser le sol
 float planetSelfRotationSpeed = 0.005f; // Ralenti aussi la rotation sur elle meme
 float groundRotationThreshold = 0.05f; // distance seuil pour considérer la caméra 'posée' sur la surface
 // Third person / Ironman
@@ -52,6 +52,17 @@ float cameraFollowDistance = 5.0f; // Plus loin pour l'orbite
 float cameraFollowHeight = 0.0f; // Centrée
 float cameraSmooth = 10.0f; 
 float ironmanModelScale = 0.01f; 
+
+// --- PHYSICS SYSTEM (KSP Style) ---
+glm::vec3 ironmanVelocity(0.0f);
+glm::vec3 ironmanForce(0.0f); // Accumulateur de forces
+float ironmanMass = 1.0f;     // Masse arbitraire (kg)
+float thrustPower = 25.0f;    // Puissance des propulseurs RCS/Jetpack
+
+// Gravité : GM = g * R^2.
+// Si on veut g ~ 9.81 sur Terre (R=1000), GM = 9.81 * 1000 * 1000 = 9,810,000
+// Ajustons pour le "fun" du gameplay
+float G_MASS_PRODUCT = 9.81f * 1000.0f * 1000.0f; 
 
 // Camera Orbital State
 float camOrbitYaw = 0.0f;
@@ -86,70 +97,62 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
 void processInput(GLFWwindow *window, glm::vec3 terrePos) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) glfwSetWindowShouldClose(window, true);
 
-    // In third-person mode, control the ironman (flight). Otherwise control the free camera.
     if (thirdPerson) {
-        float moveSpeed = ironmanSpeed * deltaTime;
-        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) moveSpeed *= 2.0f;
-
-        // La direction "Avant" du joueur dépend de la caméra (pour que W aille "au fond de l'ecran")
-        // On projette le vecteur avant de la camera sur le plan horizontal (XZ local du joueur si gravité ?)
-        // Simplification: On utilise Camera Front projetée
-        glm::vec3 camDir = camera.Front;
+        // --- CONTROLES PHYSIQUES (RCS / JETPACK) ---
+        // On n'affecte plus la position, mais on applique une FORCE
         
-        // Si on veut contrôle type AVION/KSP EVA :
-        // W = Avancer dans la direction où regarde le joueur ? 
-        // User demande "KSP quand on est avec un kerbal" (EVA)
-        // -> ZQSD déplace le kerbal par rapport à la caméra. 
-        // -> Espace monte, Ctrl descend.
-        // -> La caméra tourne autour librement.
-        // -> Le kerbal s'oriente vers le mouvement.
+        glm::vec3 inputForce(0.0f);
         
-        glm::vec3 moveDir(0.0f);
-        glm::vec3 camRight = camera.Right;
+        // Orientation relative à la caméra pour les contrôles (EVA Style)
         glm::vec3 camFront = camera.Front;
-     
-        // On veut bouger 'à plat' par rapport à la caméra si possible, ou en 3D
-        // EVA spatial = 3D.
-        
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) moveDir += camFront;
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) moveDir -= camFront;
-        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) moveDir -= camRight;
-        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) moveDir += camRight;
-        
-        // Space / Ctrl (Up / Down global ou local ?)
-        // KSP EVA a un Jetpack. Space = Up (relatif camera up ?)
-        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) moveDir += camera.Up;
-        if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) moveDir -= camera.Up;
+        glm::vec3 camRight = camera.Right;
+        glm::vec3 camUp    = camera.Up;
 
-        if (glm::length(moveDir) > 0.01f) {
-            moveDir = glm::normalize(moveDir);
-            ironmanPos += moveDir * moveSpeed;
+        float currentThrust = thrustPower;
+        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) currentThrust *= 2.0f;
+
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) inputForce += camFront;
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) inputForce -= camFront;
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) inputForce -= camRight;
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) inputForce += camRight;
+        
+        // Monter/Descendre (RCS Up/Down)
+        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) inputForce += camUp;
+        if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) inputForce -= camUp;
+
+        // Normaliser si on appuie sur plusieurs touches pour pas aller plus vite en diagonale
+        if (glm::length(inputForce) > 0.1f) {
+            inputForce = glm::normalize(inputForce) * currentThrust;
             
-            // Le perso regarde dans la direction du mouvement (slerp pour lissage ?)
-            ironmanForward = moveDir; 
-            // Update Pitch/Yaw for rendering model correctly
-            // (Simple LookAt direction)
+            // Le joueur regarde dans la direction où il pousse (Optionnel)
+            // ironmanForward = glm::normalize(inputForce);
         }
 
-    } else {
-        // Calcul de la distance pour adapter la vitesse (free camera)
-        float d = glm::length(camera.Position - terrePos);
-        float distToSurfaceFactor = glm::clamp((d - TerreRadius) * 0.5f, 0.02f, 1.0f);
+        // Ajouter cette force à l'accumulateur global
+        ironmanForce += inputForce;
         
-        float speedMultiplier = 10.0f;
-        if (d < TerreRadius * 5.0f) speedMultiplier = TerreRadius * 2.0f;
-        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) speedMultiplier *= 4.0f;
+        // Stabilisateur d'inertie (SAS) : Si on n'appuie sur rien, on freine un peu ("Friction de l'air" ou SAS actif)
+        // Pour simuler le vide spatial "vrai", mettre le facteur de freinage très bas (0.01f)
+        // Pour un gameplay jouable, mettre plus haut (0.5f - 2.0f)
+        float sasFactor = 1.0f; 
+        if (glm::length(inputForce) < 0.1f) {
+            ironmanForce -= ironmanVelocity * sasFactor;
+        }
 
-        float currentSpeed = baseCameraSpeed * speedMultiplier * distToSurfaceFactor * deltaTime;
-
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.ProcessKeyboard("FORWARD", currentSpeed);
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.ProcessKeyboard("BACKWARD", currentSpeed);
-        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) camera.ProcessKeyboard("LEFT", currentSpeed);
-        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera.ProcessKeyboard("RIGHT", currentSpeed);
+     /* Code clean-up: ancienne logique supprimee */
+    } else {
+         float camSpeed = 50.0f * deltaTime;
+         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.ProcessKeyboard("FORWARD", camSpeed);
+         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.ProcessKeyboard("BACKWARD", camSpeed);
+         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) camera.ProcessKeyboard("LEFT", camSpeed);
+         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera.ProcessKeyboard("RIGHT", camSpeed);
     }
 
     if (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS) {
         if (!pKeyPressed) { wireframeMode = !wireframeMode; pKeyPressed = true; }
+    }
+    if (glfwGetKey(window, GLFW_KEY_P) == GLFW_RELEASE) {
+        pKeyPressed = false;
     }
 
     if(glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
@@ -157,14 +160,25 @@ void processInput(GLFWwindow *window, glm::vec3 terrePos) {
         camera.Position = terrePos + glm::vec3(0.0f, TerreRadius + playerUnit * 2.0f, 5.0f);
         std::cout << "Camera reset to above the planet." << std::endl;
     }
+    
+    // Toggle Ray
+    static bool lPressed = false;
     if(glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) {
-        showRay = !showRay;
-        std::cout << "Show Ray: " << (showRay ? "ON" : "OFF") << std::endl;
+        if(!lPressed) {
+            showRay = !showRay;
+            std::cout << "Show Ray: " << (showRay ? "ON" : "OFF") << std::endl;
+            lPressed = true;
+        }
+    } else {
+        lPressed = false;
     }
+
     //positionner autour de la terre
     if(glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS) {
         // Teleport the player (Ironman) to a point above the planet surface and make camera follow
         ironmanPos = terrePos + glm::vec3(0.0f, TerreRadius + playerUnit * 0.5f, 0.0f);
+        ironmanVelocity = glm::vec3(0.0f); // Reset velocity
+        
         // Recompute desired camera position immediately so it snaps behind the player
         glm::vec3 desiredCam = ironmanPos - ironmanForward * cameraFollowDistance + glm::vec3(0.0f, cameraFollowHeight, 0.0f);
         camera.Position = desiredCam;
@@ -181,7 +195,13 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(1024, 768, "Planet Engine - Auto Capture", NULL, NULL);
+    GLFWwindow* window = NULL;
+    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+    const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+    
+    // Fullscreen : On utilise la resolution native du moniteur
+    window = glfwCreateWindow(mode->width, mode->height, "Planet Engine - Fullscreen", monitor, NULL);
+    
     if (!window) { glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
     glfwSetCursorPosCallback(window, mouse_callback);
@@ -313,6 +333,7 @@ int main() {
     // Planet start pos at t=0 is (0, 0, planetDistance)
     glm::vec3 startPlanetPos = glm::vec3(0.0f, 0.0f, planetDistance);
     ironmanPos = startPlanetPos + glm::vec3(0.0f, TerreRadius + 5.0f, 0.0f);
+    lastPlanetPos = startPlanetPos;
     
     // Reset camera too
     camera.Position = ironmanPos + glm::vec3(0.0f, 5.0f, 10.0f);
@@ -342,65 +363,94 @@ int main() {
 
         processInput(window, terrePos);
 
-        // --- SYSTEME D'ATTRACTION ET COLLISION (APPLIQUÉ AU JOUEUR) ---
+        // --- SYSTEME PHYSIQUE (Newtonian / KSP) ---
+        
+        // 1. Déplacer le joueur avec la planète (Frame of Reference Relatif)
+        ironmanPos += (terrePos - lastPlanetPos);
+
+        // 2. Calcul Physique Vectorielle
+        glm::vec3 dirToPlanet = terrePos - ironmanPos;
+        float distToPlanet = glm::length(dirToPlanet);
+        glm::vec3 gravityDir = glm::normalize(dirToPlanet); // Pointe vers le centre
+        
+        if (distToPlanet < 1.0f) distToPlanet = 1.0f;
+
+        // F_gravity = G * M * m / r^2 => a = GM / r^2
+        float gravityAccel = G_MASS_PRODUCT / (distToPlanet * distToPlanet);
+        
+        // --- RESISTANCE DE L'AIR (DRAG) ---
+        // Altitude approximative par rapport au rayon théorique (ou hSol pour plus de précision si dispo)
+        // Simplification: On prend distToPlanet - TerreRadius pour l'altitude grossiere pour le drag
+        // Atmosphère finit vers 140-200 unités
+        float altitude = distToPlanet - TerreRadius;
+        float atmosphereHeight = 200.0f; 
+        
+        if (altitude < atmosphereHeight) {
+            // Densité lineaire (1 au sol, 0 en espace)
+            float density = 1.0f - glm::clamp(altitude / atmosphereHeight, 0.0f, 1.0f);
+            
+            // Force de trainée : F = -0.5 * rho * v * v * Cd * A
+            // Simplifié : F = -v * density * dragFactor
+            // On veut que ça freine bien au sol
+            float dragFactor = 2.0f; 
+            
+            glm::vec3 dragForce = -ironmanVelocity * density * dragFactor;
+            ironmanForce += dragForce;
+        }
+
+        // Integration Vitesse : V += (a_grav + a_thrust) * dt
+        glm::vec3 acceleration = gravityDir * gravityAccel;
+        acceleration += ironmanForce / ironmanMass; // Thrust
+        
+        ironmanVelocity += acceleration * deltaTime;
+
+        // Integration Position : P += V * dt
+        ironmanPos += ironmanVelocity * deltaTime;
+
+        // Reset inputs
+        ironmanForce = glm::vec3(0.0f);
+
+        // 3. Collision avec le Sol (Planet Surface)
         glm::vec3 dirFromCenter = ironmanPos - terrePos;
         float currentDist = glm::length(dirFromCenter);
-        glm::vec3 rayDir = glm::normalize(dirFromCenter);
-        // Prendre en compte la rotation appliquée au modelTerre lors du rendu :
-        // on convertit la direction monde en direction locale (inverse rotation)
-        float modelAngle = currentFrame * 0.02f;
-        glm::mat4 invRot = glm::rotate(glm::mat4(1.0f), -modelAngle, glm::vec3(0,1,0));
+        glm::vec3 rayDir = glm::normalize(dirFromCenter); // Normale sortante (up)
+        
+        // Rotation pour heightmap (Doit matcher le rendu ~0.001f)
+        float planetRotAnglePhysics = currentFrame * 0.001f; 
+        
+        glm::mat4 invRot = glm::rotate(glm::mat4(1.0f), -planetRotAnglePhysics, glm::vec3(0,1,0));
         glm::vec3 localRayDir = glm::vec3(invRot * glm::vec4(rayDir, 0.0f));
+        
         float hSol = terre.getSurfaceHeight(localRayDir);
-        float deltaSurface = currentDist - hSol;
-
+        float minAllowedDist = hSol + playerHeight;
+        
+        // [DEBUG LOGGING]
         static int logCounter = 0;
-        if (logCounter++ % 100 == 0) {
-            // Distance to Surface devient dynamique
-            std::cout << "\r[DEBUG] Dist: " << currentDist 
-                    << " | Sol: " << hSol 
-                    << " | Delta: " << deltaSurface << "      " << std::flush;
+        if (logCounter++ % 60 == 0) {
+            printf("\r[Phys] Alt: %.1f | Vel: %.1f | G: %.3f     ", 
+                currentDist - hSol, glm::length(ironmanVelocity), gravityAccel);
+        }
+
+        if (currentDist < minAllowedDist) {
+            // COLLISION SOL
+            // a) Snap Position
+            ironmanPos = terrePos + rayDir * minAllowedDist;
+            
+            // b) Gestion Vitesse
+            float vDotN = glm::dot(ironmanVelocity, rayDir);
+            
+            if (vDotN < 0) { // Si on va VERS le sol
+                // Annuler composante verticale
+                ironmanVelocity -= vDotN * rayDir;
+                // Friction
+                ironmanVelocity *= 0.95f; 
+                // Hard Stop si lent
+                if (glm::length(ironmanVelocity) < 0.5f) {
+                   ironmanVelocity = glm::vec3(0.0f);
+                }
+            }
         }
         
-        // Rayon d'influence (Capture la caméra si elle est proche)
-        float influenceRadius = TerreRadius * 5.0f; 
-
-        if (currentDist < influenceRadius) {
-            std::cout << "\r[Attraction Active] Player Dist to Surface: " << (currentDist - TerreRadius) << "      " << std::flush;
-            // Suivi du mouvement orbital appliqué au joueur
-            glm::vec3 planetMovement = terrePos - lastPlanetPos;
-            ironmanPos += planetMovement;
-
-            // Collision précise par Raycast (sur le joueur)
-            glm::vec3 rayDirInner = glm::normalize(dirFromCenter);
-            glm::mat4 invRotInner = glm::rotate(glm::mat4(1.0f), -modelAngle, glm::vec3(0,1,0));
-            glm::vec3 localRayDirInner = glm::vec3(invRotInner * glm::vec4(rayDirInner, 0.0f));
-            float terrainHeight = terre.getSurfaceHeight(localRayDirInner);
-            float minAllowedDist = terrainHeight + playerHeight;
-
-            // Si le joueur pénètre le sol, on le replace exactement sur la surface
-            if (currentDist < minAllowedDist) {
-                ironmanPos = terrePos + rayDirInner * minAllowedDist;
-            }
-
-            // Si le joueur est très proche de la surface on lui applique la rotation propre de la planète
-            if (std::abs(currentDist - minAllowedDist) < groundRotationThreshold) {
-                // angle de rotation depuis la frame précédente
-                float rotationDelta = deltaTime * planetSelfRotationSpeed;
-                glm::mat4 rot = glm::rotate(glm::mat4(1.0f), rotationDelta, glm::vec3(0,1,0));
-
-                // Rotate player position around planet center
-                glm::vec3 localPos = ironmanPos - terrePos;
-                localPos = glm::vec3(rot * glm::vec4(localPos, 1.0f));
-                ironmanPos = terrePos + localPos;
-
-                // Rotate player forward vector so the player 'turns' with the ground
-                ironmanForward = glm::normalize(glm::vec3(rot * glm::vec4(ironmanForward, 0.0f)));
-                // Recompute yaw/pitch from forward vector
-                ironmanYaw = glm::degrees(atan2(ironmanForward.z, ironmanForward.x));
-                ironmanPitch = glm::degrees(asin(glm::clamp(ironmanForward.y, -1.0f, 1.0f)));
-            }
-        }
         lastPlanetPos = terrePos;
 
         // --- THIRD-PERSON CAMERA ORBIT (KSP Style) ---
@@ -427,7 +477,27 @@ int main() {
              // La position brute par rapport à l'univers (sans rotation locale du joueur)
              glm::vec3 orbitPos = glm::vec3(offsetX, offsetY, offsetZ);
 
-             camera.Position = ironmanPos + orbitPos;
+             glm::vec3 potentialCamPos = ironmanPos + orbitPos;
+
+             // --- COLLISION CAMERA SOL ---
+             // Empêcher la caméra de passer sous le terrain
+             glm::vec3 dirCamCenter = potentialCamPos - terrePos;
+             float distCamCenter = glm::length(dirCamCenter);
+             glm::vec3 rayCamDesc = glm::normalize(dirCamCenter);
+             
+             // Rotation inverse pour sampling heightmap (comme pour le joueur)
+             float camRotAngle = currentFrame * 0.001f;
+             glm::mat4 invRotCam = glm::rotate(glm::mat4(1.0f), -camRotAngle, glm::vec3(0,1,0));
+             glm::vec3 localRayCam = glm::vec3(invRotCam * glm::vec4(rayCamDesc, 0.0f));
+             
+             float hCamSol = terre.getSurfaceHeight(localRayCam);
+             float minCamHeight = hCamSol + 2.0f; // Garder la cam 2m au dessus du sol min
+             
+             if (distCamCenter < minCamHeight) {
+                 potentialCamPos = terrePos + rayCamDesc * minCamHeight;
+             }
+
+             camera.Position = potentialCamPos;
              camera.Front = glm::normalize(ironmanPos - camera.Position);
              
              // Recalculer Up pour rester stable
@@ -535,8 +605,8 @@ int main() {
             shaderModel.use();
             // determine local up (planet normal if in influence)
             glm::vec3 camUp = glm::vec3(0.0f, 1.0f, 0.0f);
-            float distToPlanet = glm::length(ironmanPos - terrePos);
-            if (distToPlanet < (TerreRadius * 5.0f)) camUp = glm::normalize(ironmanPos - terrePos);
+            float distToPlanetVisual = glm::length(ironmanPos - terrePos);
+            if (distToPlanetVisual < (TerreRadius * 5.0f)) camUp = glm::normalize(ironmanPos - terrePos);
 
             // Build an orthonormal basis where model's local forward aligns with ironmanForward
             glm::vec3 basisZ = glm::normalize(ironmanForward);
