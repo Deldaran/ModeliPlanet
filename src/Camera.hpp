@@ -28,8 +28,8 @@ class Camera {
         return glm::lookAt(Position, Position + Front, Up);
     }
 
-    void ProcessKeyboard(const std::string& direction, float deltaTime) {
-        float velocity = MovementSpeed * deltaTime;
+    // Accept a precomputed velocity (distance to move) rather than deltaTime.
+    void ProcessKeyboard(const std::string& direction, float velocity) {
         if (direction == "FORWARD")  Position += Front * velocity;
         if (direction == "BACKWARD") Position -= Front * velocity;
         if (direction == "LEFT")     Position -= Right * velocity;

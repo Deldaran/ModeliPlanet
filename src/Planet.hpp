@@ -7,7 +7,11 @@
 #include <cmath>
 #include <map>
 #include <algorithm>
+#include <iostream>
+#include <string>
+#include "stb_image.h"
 #include "FastNoiseLite.h"
+
 
 
 #ifndef M_PI
@@ -192,6 +196,30 @@ public:
 
                 heightMap[y * mapWidth + x] = n;
             }
+        }
+    }
+
+    bool loadHeightMapFromImage(const std::string& path) {
+        int width, height, nrChannels;
+        unsigned char* data = stbi_load(path.c_str(), &width, &height, &nrChannels, 0);
+        if (data) {
+            mapWidth = width;
+            mapHeight = height;
+            heightMap.resize(mapWidth * mapHeight);
+
+            // OpenMP pour accélérer la lecture si possible
+            #pragma omp parallel for
+            for (int i = 0; i < mapWidth * mapHeight; ++i) {
+                // On prend le canal Rouge, normalisé 0..1
+                unsigned char val = data[i * nrChannels]; 
+                heightMap[i] = val / 255.0f;
+            }
+            stbi_image_free(data);
+            std::cout << "Heightmap chargee avec succes : " << path << " (" << width << "x" << height << ")" << std::endl;
+            return true;
+        } else {
+            std::cerr << "ECHEC chargement heightmap : " << path << std::endl;
+            return false;
         }
     }
 

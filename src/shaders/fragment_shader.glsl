@@ -2,13 +2,29 @@
 out vec4 FragColor;
 
 in float vAltitude;
+in vec2 vTexCoords;
 in vec3 vNormal;
 in vec3 vFragPos;
 in vec4 vFragPosLightSpace;
 
 uniform vec3 lightPos;
-uniform vec3 viewPos; // Ajoute l'uniform de la position caméra pour le reflet
+uniform vec3 viewPos;
 uniform sampler2D shadowMap;
+uniform sampler2D planetData;
+
+float rand(vec2 co){
+    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+}
+float pNoise(vec2 st) {
+    vec2 i = floor(st);
+    vec2 f = fract(st);
+    float a = rand(i);
+    float b = rand(i + vec2(1.0, 0.0));
+    float c = rand(i + vec2(0.0, 1.0));
+    float d = rand(i + vec2(1.0, 1.0));
+    vec2 u = f*f*(3.0-2.0*f);
+    return mix(a, b, u.x) + (c - a)* u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+}
 
 float ShadowCalculation(vec4 fragPosLightSpace) {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
@@ -31,60 +47,56 @@ float ShadowCalculation(vec4 fragPosLightSpace) {
 }
 
 void main() {
-    // 1. VARIABLES DE BASE (Calculées au début pour être dispo partout)
     vec3 norm = normalize(vNormal);
     vec3 lightDir = normalize(lightPos - vFragPos);
     vec3 viewDir = normalize(viewPos - vFragPos);
     float shadow = ShadowCalculation(vFragPosLightSpace);
     float diff = max(dot(norm, lightDir), 0.0);
 
-    // 2. PALETTE DE COULEURS
-    vec3 deepOcean  = vec3(0.01, 0.05, 0.15); 
+    float heightHD = texture(planetData, vTexCoords).r;
+    float grain = pNoise(vTexCoords * 4000.0); 
+    float a_detailed = heightHD + (grain * 0.02 - 0.01);
+
+    vec3 deepOcean  = vec3(0.005, 0.01, 0.25); 
     vec3 shallowSea = vec3(0.0, 0.4, 0.6);    
-    vec3 beach      = vec3(0.8, 0.7, 0.5);    
-    vec3 forest     = vec3(0.1, 0.35, 0.1);   
-    vec3 rock       = vec3(0.4, 0.38, 0.35);  
+    vec3 beach      = vec3(0.76, 0.70, 0.50);    
+    vec3 forest     = vec3(0.05, 0.25, 0.05);   
+    vec3 plain      = vec3(0.2, 0.4, 0.15); 
+    vec3 rock       = vec3(0.35, 0.32, 0.30);  
     vec3 snow       = vec3(0.95, 0.95, 1.0);  
 
     vec3 color;
     float specular = 0.0;
-    float a = vAltitude;
 
-    // 3. LOGIQUE DE DISTRIBUTION
-    if (a < 0.5) {
-        // ZONE EAU (Bruit entre 0.0 et 0.5)
-        // Utilisation d'un mélange linéaire pour garantir un seuil exact à 0.5
-        float t = a / 0.5; 
-        color = mix(deepOcean, shallowSea, clamp(t, 0.0, 1.0));
-        
-        // Reflet soleil sur l'eau
+    if (a_detailed < 0.5) {
+        float t = a_detailed / 0.5; 
+        color = mix(deepOcean, shallowSea, clamp(t * t, 0.0, 1.0));
         vec3 reflectDir = reflect(-lightDir, norm);
         float spec = pow(max(dot(viewDir, reflectDir), 0.0), 64.0);
-        color += vec3(0.5) * spec * (1.0 - shadow);
+        color += vec3(0.7) * spec * (1.0 - shadow);
     } 
     else {
-        // ZONE TERRE (Bruit entre 0.5 et 1.0)
-        // On recalcule un ratio h entre 0 et 1 pour la terre ferme
-        float h = (a - 0.5) * 2.0; 
-
-        if (h < 0.05) {
-            color = vec3(0.8, 0.7, 0.5); // Plage
-        } else if (h < 0.4) {
-            float t = smoothstep(0.05, 0.4, h);
-            color = mix(vec3(0.8, 0.7, 0.5), vec3(0.1, 0.4, 0.1), t); // Plaine
-        } else if (h < 0.7) {
-            float t = smoothstep(0.4, 0.7, h);
-            color = mix(vec3(0.1, 0.4, 0.1), vec3(0.4, 0.35, 0.3), t); // Roche
-        } else {
-            float t = smoothstep(0.7, 1.0, h);
-            color = mix(vec3(0.4, 0.35, 0.3), vec3(0.95, 0.95, 1.0), t); // Neige
+        float h = (a_detailed - 0.5) * 2.0; 
+        if (h < 0.03) {
+            color = beach * (0.9 + 0.2 * grain); 
+        } 
+        else if (h < 0.35) {
+            float t = smoothstep(0.03, 0.35, h);
+            vec3 vegetation = mix(plain, forest, grain * 0.5 + 0.5); 
+            color = mix(beach, vegetation, t);
+        } 
+        else if (h < 0.65) {
+            float t = smoothstep(0.35, 0.65, h);
+            vec3 rockDetail = rock * (0.8 + 0.4 * grain); 
+            color = mix(forest, rockDetail, t);
+        } 
+        else {
+            float t = smoothstep(0.65, 0.85, h);
+            color = mix(rock, snow, t);
         }
     }
 
-    // 4. CALCUL FINAL
-    vec3 ambient = 0.15 * color;
-    // On ajoute le spéculaire uniquement s'il n'y a pas d'ombre
-    vec3 result = (ambient + (1.0 - shadow) * (diff * color + specular));
-
-    FragColor = vec4(result, 1.0);
+    vec3 ambient = 0.05 * color;
+    vec3 lighting = (ambient + (1.0 - shadow) * (diff * color + specular));
+    FragColor = vec4(lighting, 1.0);
 }
