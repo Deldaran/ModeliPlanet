@@ -11,6 +11,11 @@ uniform vec3 lightPos;
 uniform vec3 viewPos;
 uniform sampler2D shadowMap;
 uniform sampler2D planetData;
+uniform sampler2D cloudTexture; 
+uniform sampler3D noiseTexture3D;
+uniform float cloudRotationOffset;
+uniform vec3 planetCenter;
+uniform float time; // Needed for noise animation
 
 float rand(vec2 co){
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
@@ -51,6 +56,66 @@ void main() {
     vec3 lightDir = normalize(lightPos - vFragPos);
     vec3 viewDir = normalize(viewPos - vFragPos);
     float shadow = ShadowCalculation(vFragPosLightSpace);
+    
+    // --- OMBRES NUAGES (CAST SHADOWS) ---
+    float cloudAltitude = 120.0;
+    
+    // Direction vers le soleil
+    vec3 L = normalize(lightPos - planetCenter);
+    vec3 planetN = normalize(vFragPos - planetCenter);
+    
+    // Parallax simplifiee et stabilisee
+    // On limite l'etirement de l'ombre en clampant le dot product à 0.25
+    // Cela evite que l'ombre ne couvre toute la planete lors des angles rasants (Bug du noir complet)
+    float NdotL = max(dot(planetN, L), 0.25); 
+    float distToCloud = cloudAltitude / NdotL;
+    
+    // Position projetee dans la couche nuageuse
+    vec3 cloudPos = vFragPos + L * distToCloud;
+    
+    // UV Mapping
+    vec3 pRel = cloudPos - planetCenter;
+    vec3 dir = normalize(pRel);
+    vec2 cloudUV = vec2(
+        0.5 + atan(dir.z, dir.x) / (2.0 * 3.14159265),
+        0.5 - asin(dir.y) / 3.14159265
+    );
+    cloudUV.x += cloudRotationOffset; // Sync avec la rotation des nuages
+    
+    // Sampling & Evolution "Naturelle" (Copie exacte de f_cloud.glsl)
+    // 1. Lire la "Carte" (Forme générale des continents nuageux)
+    vec4 cSample = texture(cloudTexture, cloudUV);
+    float mapCoverage = cSample.r * cSample.a; // Support PNG transparent
+    
+    // 2. Lire le "Vent/Chaos" (Bruit 3D qui fait bouger et evoluer les formes)
+    // On utilise les memes coordonnees que le shader de nuages (Vent ralenti x10)
+    vec3 animPos = pRel * 0.0003 + vec3(time * 0.0005, 0.0, 0.0);
+    float lowFreq = texture(noiseTexture3D, animPos).r;
+    
+    float coverage = mapCoverage * mapCoverage; // Simple quadratic falloff
+    
+    float combinedFn = 0.0;
+    // Si pas de nuage sur la carte, on sort direct (Optimisation)
+    if (coverage > 0.1) {
+        // Meme echelle que le nouveau shader de nuages
+        vec3 shapePos = pRel * 0.0003 + vec3(time * 0.00005, 0.0, 0.0);
+        float baseNoise = texture(noiseTexture3D, shapePos).r;
+        
+        // Formule Nubis simplifié pour l'ombre
+        // On seuille le bruit par l'inverse de la coverage
+        float baseCloud = clamp((baseNoise - (1.0 - coverage)) / coverage, 0.0, 1.0);
+        
+        combinedFn = baseCloud;
+    }
+
+    // Calcul final de l'ombre
+    float cloudShadow = smoothstep(0.1, 0.6, combinedFn) * 0.8;
+    
+    // Fade Horizon: Reduit l'ombre sur les bords de la planete pour eviter les artefacts
+    cloudShadow *= smoothstep(0.0, 0.3, dot(planetN, L)); // Utilise le vrai dot ici
+    
+    shadow = max(shadow, cloudShadow);
+    
     float diff = max(dot(norm, lightDir), 0.0);
 
     float heightHD = texture(planetData, vTexCoords).r;

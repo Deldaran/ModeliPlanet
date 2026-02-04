@@ -1,0 +1,22 @@
+^C:\USERS\DEDJO\MODELIPLANET\BUILD\CMAKEFILES\39208BF81818E37E72FBD29EDBE8A43E\COPY_SHADERS.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E make_directory C:/Users/dedjo/ModeliPlanet/build/shaders
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_directory C:/Users/dedjo/ModeliPlanet/src/shaders C:/Users/dedjo/ModeliPlanet/build/shaders
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\USERS\DEDJO\MODELIPLANET\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/dedjo/ModeliPlanet -BC:/Users/dedjo/ModeliPlanet/build --check-stamp-file C:/Users/dedjo/ModeliPlanet/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

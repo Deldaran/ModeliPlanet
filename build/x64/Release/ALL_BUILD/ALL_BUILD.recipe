@@ -14,6 +14,9 @@
       <FullPath>C:\Users\dedjo\ModeliPlanet\build\Release\generate_heightmap.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>C:\Users\dedjo\ModeliPlanet\build\Release\generate_noise3d.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>C:\Users\dedjo\ModeliPlanet\build\x64\Release\ALL_BUILD</FullPath>
     </ProjectOutput>
   </ProjectOutputs>

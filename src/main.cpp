@@ -31,8 +31,8 @@ bool pKeyPressed = false;
 float playerUnit = 1.0f; // taille de l'entité (1f)
 // Ne pas modifier les planètes automatiquement ici — garder leurs tailles d'origine
 float TerreRadius = 1000.0f; // PLANETE GEANTE (X10 par rapport a 90)
-float SoleilRadius = 5000.0f; // Soleil plus grand aussi
-float planetDistance = 20000.0f; // Plus loin
+float SoleilRadius = 3000.0f; // Soleil plus grand aussi
+float planetDistance = 50000.0f; // Plus loin
 // Ralentissement global pour effet "Realiste"
 // 0.01 c'etait ~10min par orbite. On passe a 0.0005 (~3h par orbite)
 float planetAngularSpeed = 0.0005f; 
@@ -563,7 +563,7 @@ int main() {
         glfwGetFramebufferSize(window, &width, &height);
         glm::mat4 view = camera.GetViewMatrix();
         // Near plane légèrement augmenté pour reduire Z-fighting au loin
-        glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float)width/(float)height, 0.1f, 2000000.0f);
+        glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float)width/(float)height, 0.01f, 2000000.0f);
 
         // Ombre
         glm::mat4 lightProjection = glm::ortho(-15.0f, 15.0f, -15.0f, 15.0f, 0.1f, 2500.0f);
@@ -576,7 +576,7 @@ int main() {
         shaderShadow.use();
         
         // Rotation Planete Sychronisée
-        float planetRotAngle = currentFrame * 0.001f; // Vitesse reduite (etait 0.02)
+        float planetRotAngle = currentFrame * 0.0001f; // Vitesse reduite de x10 pour plus de calme
         
         glm::mat4 modelTerre = glm::translate(glm::mat4(1.0f), terrePos);
         modelTerre = glm::rotate(modelTerre, planetRotAngle, glm::vec3(0, 1, 0));
@@ -643,11 +643,27 @@ int main() {
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, depthMap);
         shaderPlanete.setInt("shadowMap", 1);
-        
+
         // Planet Height/Detail Map (Texture 0)
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, planetTexture);
-        shaderPlanete.setInt("planetData", 0); // On passera ça dans le shader
+        shaderPlanete.setInt("planetData", 0);
+
+        // Cloud Shadow Map (Texture 2)
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, cloudTexture);
+        shaderPlanete.setInt("cloudTexture", 2);
+
+        // 3D Noise for accurate Cloud Shadows (Texture 3)
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_3D, volumeCloudTex);
+        shaderPlanete.setInt("noiseTexture3D", 3);
+        
+        // Pass sync vars
+        float cloudOffset = (currentFrame * 0.0001f) / (2.0f * 3.14159265f);
+        shaderPlanete.setFloat("cloudRotationOffset", cloudOffset);
+        shaderPlanete.setVec3("planetCenter", terrePos);
+        shaderPlanete.setFloat("time", (float)glfwGetTime());
 
         terre.draw();
 
@@ -684,11 +700,35 @@ int main() {
              // Transparence : On ne veut pas écrire dans le Z-buffer pour ne pas cacher l'atmosphère derrière
             glDepthMask(GL_FALSE);
             
-            // CORRECTION DOME/CLIPPING:
-            // On active le culling mais on inverse le sens : on ne dessine QUE les faces arrieres (Inside).
-            // Cela évite que la caméra ne "clippe" la géométrie quand on traverse la couche.
+            // CORRECTION DOME/CLIPPING & VISIBILITE ESPACE:
+            // Si on est dans l'espace (loins), on dessine les FACES AVANT (pour que le depth test passe DEVANT la planete)
+            // Si on est dans l'atmosphere (dedans), on dessine les FACES ARRIERES (pour voir le volume de l'interieur)
+            float distCam = glm::length(camera.Position - terrePos);
+            // Seuil de transition : Rayon Terre + Max Altitude Nuage + Marge
+            float transitionAlt = TerreRadius + 160.0f; 
+            
             glEnable(GL_CULL_FACE);
-            glCullFace(GL_FRONT); // Rejeter l'avant, garder l'arrière
+            if (distCam > transitionAlt) { 
+                // ESPACE : Vue exterieure -> On dessine la coque externe
+                glCullFace(GL_BACK);
+            } else {
+                 // ATMOSPHERE/SOL : Vue interieure -> On dessine la coque interne
+                 // On doit utiliser GL_LESS pour que les montagnes (Planete) cachent les nuages derriere elles.
+                 // Le rayon (Z-Far) est suffisant (2M) pour voir la coque arriere.
+                 glCullFace(GL_FRONT); 
+            }
+                 
+            // Depth Mask False est correct pour la transparence
+            glDepthMask(GL_FALSE);
+            // Depth Test standard (LESS)
+            glDepthFunc(GL_LESS);
+
+            shaderNuages.use();
+            
+            // Depth Mask False est correct pour la transparence (pas d'ecriture Z, mais lecture Z active)
+            glDepthMask(GL_FALSE);
+
+            shaderNuages.use();
 
             shaderNuages.use();
             
@@ -714,16 +754,17 @@ int main() {
             shaderNuages.setFloat("time", (float)glfwGetTime());
             
             // SYNCHRONISATION ROTATION
-            // On calcule l'offset UV (0..1) correspondant a l'angle de rotation (0..2PI)
-            // angle = currentFrame * 0.001
-            float cloudOffset = (currentFrame * 0.001f) / (2.0f * 3.14159265f);
+            // Vitesse de rotation ultra-lente pour etre realiste
+            // 0.00001f au lieu de 0.0001f (10x plus lent)
+            // Correction finale: Valeur infime pour que ca paraisse fixe (pour test)
+            float cloudOffset = (currentFrame * 0.000002f) / (2.0f * 3.14159265f);
             shaderNuages.setFloat("cloudRotationOffset", cloudOffset);
             
             shaderNuages.setFloat("planetRadius", TerreRadius);
             // On remonte les nuages pour qu'ils ne touchent plus le relief
             // Relief max = ~0.05 * 1000 = 50. donc on commence a 80
-            shaderNuages.setFloat("cloudMinHeight", 80.0f); // Altitude min augmentée (etait 10)
-            shaderNuages.setFloat("cloudMaxHeight", 140.0f); // Altitude max (etait 50)
+            shaderNuages.setFloat("cloudMinHeight", 90.0f); 
+            shaderNuages.setFloat("cloudMaxHeight", 210.0f); // Altitude max augmentée significativement pour des tours géantes (etait 140)
 
              glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, cloudTexture);
@@ -733,11 +774,18 @@ int main() {
             glBindTexture(GL_TEXTURE_3D, volumeCloudTex);
             shaderNuages.setInt("noiseTexture3D", 1);
 
-            // Blend Mode specifique pour l'accumulation
-            // Volumetric clouds output premultiplied alpha-ish
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); 
+            // Blend Mode : PRE-MULTIPLIED ALPHA (CORRECT VOLUMETRIC)
+            // Use GL_ONE for Source because shader outputs (Color * Alpha).
+            // Use GL_ONE_MINUS_SRC_ALPHA for Destination to let background show through (1 - Alpha).
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); 
 
             terreNuages.draw();
+
+            // Reset Blend Mode standard
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            // Reset Depth Func standard
+            glDepthFunc(GL_LESS);
 
             glCullFace(GL_BACK); // Rétablir le culling standard
             glDepthMask(GL_TRUE);
