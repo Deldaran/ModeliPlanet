@@ -1,8 +1,10 @@
+#define NOMINMAX
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
+#include <fstream>
 #include <algorithm>
 #include "Planet.hpp"
 #include "Shader.hpp"
@@ -68,6 +70,8 @@ float G_MASS_PRODUCT = 9.81f * 1000.0f * 1000.0f;
 float camOrbitYaw = 0.0f;
 float camOrbitPitch = 20.0f;
 float camOrbitDist = 5.0f;
+bool cameraTargetPlanet = false; // F3 Mode: Orbit Planet vs Orbit Player
+bool f3Pressed = false;          // Toggle latch
 
 // --- Callbacks ---
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
@@ -173,19 +177,23 @@ void processInput(GLFWwindow *window, glm::vec3 terrePos) {
         lPressed = false;
     }
 
-    //positionner autour de la terre
+    // Toggle F3: Camera Orbit Target (Player vs Planet)
     if(glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS) {
-        // Teleport the player (Ironman) to a point above the planet surface and make camera follow
-        ironmanPos = terrePos + glm::vec3(0.0f, TerreRadius + playerUnit * 0.5f, 0.0f);
-        ironmanVelocity = glm::vec3(0.0f); // Reset velocity
-        
-        // Recompute desired camera position immediately so it snaps behind the player
-        glm::vec3 desiredCam = ironmanPos - ironmanForward * cameraFollowDistance + glm::vec3(0.0f, cameraFollowHeight, 0.0f);
-        camera.Position = desiredCam;
-        camera.Front = glm::normalize(ironmanPos - camera.Position);
-        camera.Right = glm::normalize(glm::cross(camera.Front, camera.WorldUp));
-        camera.Up = glm::normalize(glm::cross(camera.Right, camera.Front));
-        std::cout << "Player teleported above the planet surface." << std::endl;
+        if (!f3Pressed) {
+            cameraTargetPlanet = !cameraTargetPlanet;
+            f3Pressed = true;
+            std::cout << "Camera Mode: " << (cameraTargetPlanet ? "ORBIT PLANET" : "ORBIT PLAYER") << std::endl;
+            
+            if (cameraTargetPlanet) {
+                // Swith to Planet: Set distance to see the whole planet
+                camOrbitDist = TerreRadius * 4.0f; 
+            } else {
+                // Switch to Player: Reset distance close
+                camOrbitDist = 5.0f;
+            }
+        }
+    } else {
+        f3Pressed = false;
     }
 }
 
@@ -199,8 +207,12 @@ int main() {
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = glfwGetVideoMode(monitor);
     
-    // Fullscreen : On utilise la resolution native du moniteur
-    window = glfwCreateWindow(mode->width, mode->height, "Planet Engine - Fullscreen", monitor, NULL);
+    // Fenetre Classique (Avec barre de titre) mais Maximisée
+    glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE); 
+    
+    // On laisse GLFW gérer les hints par défaut (DECORATED = TRUE)
+    // NULL pour le moniteur = Mode fenêtré.
+    window = glfwCreateWindow(1280, 720, "Planet Engine", NULL, NULL);
     
     if (!window) { glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
@@ -256,6 +268,37 @@ int main() {
         stbi_image_free(cloudData);
     } else {
         std::cout << "ERREUR: Impossible de charger planet_clouds.png" << std::endl;
+    }
+
+    // --- CHARGEMENT TEXTURE 3D (VOLUME NOISE) ---
+    unsigned int volumeCloudTex;
+    glGenTextures(1, &volumeCloudTex);
+    glBindTexture(GL_TEXTURE_3D, volumeCloudTex);
+    { // Scope pour les variables locales
+        int size = 128;
+        // RGBA = 4 channels
+        std::vector<unsigned char> noiseData(size * size * size * 4);
+        
+        // Read file
+        std::string noisePath = "assets/noise_shape_128.bin";
+        std::ifstream noiseFile(noisePath, std::ios::binary);
+        if(noiseFile) {
+            noiseFile.read((char*)noiseData.data(), noiseData.size());
+            noiseFile.close();
+            
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, size, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, noiseData.data());
+            
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            // MIRRORED_REPEAT prevents hard seams at axis 0
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_MIRRORED_REPEAT);
+            
+            std::cout << "Texture 3D (Noise) chargee avec succes." << std::endl;
+        } else {
+            std::cerr << "ERREUR: Impossible de charger " << noisePath << ". Avez-vous lance generate_noise3d ?" << std::endl;
+        }
     }
 
 
@@ -455,18 +498,21 @@ int main() {
 
         // --- THIRD-PERSON CAMERA ORBIT (KSP Style) ---
         if (thirdPerson) {
-             // Scroll pour zoomer ? (Pas implementé callback scroll ici mais on peut map I/K ou +/-)
-             if (glfwGetKey(window, GLFW_KEY_KP_ADD) == GLFW_PRESS) camOrbitDist -= deltaTime * 10.0f;
-             if (glfwGetKey(window, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS) camOrbitDist += deltaTime * 10.0f;
+             // ZOOM: Speed proportional to distance (logarithmic feel)
+             // Min speed 10, Max speed unlimited?
+             float zoomSpeed = glm::max(10.0f, camOrbitDist * 1.5f);
+             
+             if (glfwGetKey(window, GLFW_KEY_KP_ADD) == GLFW_PRESS) camOrbitDist -= deltaTime * zoomSpeed;
+             if (glfwGetKey(window, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS) camOrbitDist += deltaTime * zoomSpeed;
+             
+             // Min limit only (don't clip inside player)
              if (camOrbitDist < 2.0f) camOrbitDist = 2.0f;
-             if (camOrbitDist > 50.0f) camOrbitDist = 50.0f;
+             // No Max Limit
 
              // Calcul position camera depuis Angles Orbitaux (Spheric to Cartesian)
-             // Base locale autour du joueur
              float yaw = glm::radians(camOrbitYaw);
              float pitch = glm::radians(camOrbitPitch);
              
-             // Offset camera position
              float hDist = camOrbitDist * cos(pitch);
              float vDist = camOrbitDist * sin(pitch);
              
@@ -474,35 +520,40 @@ int main() {
              float offsetZ = hDist * cos(yaw);
              float offsetY = vDist;
              
-             // La position brute par rapport à l'univers (sans rotation locale du joueur)
              glm::vec3 orbitPos = glm::vec3(offsetX, offsetY, offsetZ);
 
-             glm::vec3 potentialCamPos = ironmanPos + orbitPos;
+             // TARGET SELECTION (F3 Toggle)
+             glm::vec3 targetPos = cameraTargetPlanet ? terrePos : ironmanPos;
+
+             glm::vec3 potentialCamPos = targetPos + orbitPos;
 
              // --- COLLISION CAMERA SOL ---
-             // Empêcher la caméra de passer sous le terrain
-             glm::vec3 dirCamCenter = potentialCamPos - terrePos;
-             float distCamCenter = glm::length(dirCamCenter);
-             glm::vec3 rayCamDesc = glm::normalize(dirCamCenter);
+             // Only check collision if we are close to the planet (to save perf and bugs when far away)
+             // And if we are targeting the player (if targeting planet from far away, we don't collide)
+             float distCamCenter = glm::length(potentialCamPos - terrePos);
              
-             // Rotation inverse pour sampling heightmap (comme pour le joueur)
-             float camRotAngle = currentFrame * 0.001f;
-             glm::mat4 invRotCam = glm::rotate(glm::mat4(1.0f), -camRotAngle, glm::vec3(0,1,0));
-             glm::vec3 localRayCam = glm::vec3(invRotCam * glm::vec4(rayCamDesc, 0.0f));
-             
-             float hCamSol = terre.getSurfaceHeight(localRayCam);
-             float minCamHeight = hCamSol + 2.0f; // Garder la cam 2m au dessus du sol min
-             
-             if (distCamCenter < minCamHeight) {
-                 potentialCamPos = terrePos + rayCamDesc * minCamHeight;
+             if (!cameraTargetPlanet || distCamCenter < (TerreRadius * 1.5f)) {
+                 glm::vec3 dirCamCenter = potentialCamPos - terrePos;
+                 glm::vec3 rayCamDesc = glm::normalize(dirCamCenter);
+                 
+                 float camRotAngle = currentFrame * 0.001f;
+                 glm::mat4 invRotCam = glm::rotate(glm::mat4(1.0f), -camRotAngle, glm::vec3(0,1,0));
+                 glm::vec3 localRayCam = glm::vec3(invRotCam * glm::vec4(rayCamDesc, 0.0f));
+                 
+                 float hCamSol = terre.getSurfaceHeight(localRayCam);
+                 float minCamHeight = hCamSol + 2.0f; 
+                 
+                 if (distCamCenter < minCamHeight) {
+                     potentialCamPos = terrePos + rayCamDesc * minCamHeight;
+                     // Also correct orbitDist to match the collision
+                     // So we don't "spring back" instantly if we zoom in
+                     camOrbitDist = glm::length(potentialCamPos - targetPos);
+                 }
              }
 
              camera.Position = potentialCamPos;
-             camera.Front = glm::normalize(ironmanPos - camera.Position);
+             camera.Front = glm::normalize(targetPos - camera.Position);
              
-             // Recalculer Up pour rester stable
-             // Dans KSP EVA, le UP de la camera tend vers le UP de l'espace ou de la planete ? 
-             // Le WorldUp est Y, donc ca va.
              camera.Right = glm::normalize(glm::cross(camera.Front, glm::vec3(0.0f, 1.0f, 0.0f)));
              camera.Up    = glm::normalize(glm::cross(camera.Right, camera.Front));
         }
@@ -632,7 +683,12 @@ int main() {
         if (!wireframeMode) {
              // Transparence : On ne veut pas écrire dans le Z-buffer pour ne pas cacher l'atmosphère derrière
             glDepthMask(GL_FALSE);
-            glDisable(GL_CULL_FACE); // Visible de l'interieur
+            
+            // CORRECTION DOME/CLIPPING:
+            // On active le culling mais on inverse le sens : on ne dessine QUE les faces arrieres (Inside).
+            // Cela évite que la caméra ne "clippe" la géométrie quand on traverse la couche.
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_FRONT); // Rejeter l'avant, garder l'arrière
 
             shaderNuages.use();
             
@@ -673,20 +729,27 @@ int main() {
             glBindTexture(GL_TEXTURE_2D, cloudTexture);
             shaderNuages.setInt("cloudCoverageMap", 0);
 
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_3D, volumeCloudTex);
+            shaderNuages.setInt("noiseTexture3D", 1);
+
             // Blend Mode specifique pour l'accumulation
             // Volumetric clouds output premultiplied alpha-ish
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); 
 
             terreNuages.draw();
 
-            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK); // Rétablir le culling standard
             glDepthMask(GL_TRUE);
         }
 
         // Atmo
         if (!wireframeMode) {
             glDepthMask(GL_FALSE);
-            glDisable(GL_CULL_FACE); // IMPORTANT : Désactiver le culling pour voir l'intérieur
+            
+            // Pareil pour l'Atmosphere : Render Back Faces only pour eviter le clipping
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_FRONT);
 
             shaderAtmosphere.use();
             glm::mat4 modelAtmo = glm::translate(glm::mat4(1.0f), terrePos);
@@ -706,7 +769,7 @@ int main() {
 
             terreAtmosphere.draw();
             
-            glEnable(GL_CULL_FACE); // Réactiver
+            glCullFace(GL_BACK); // Restore standard culling
             glDepthMask(GL_TRUE);
         }
 

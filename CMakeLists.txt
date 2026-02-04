@@ -100,3 +100,7 @@ target_include_directories(generate_heightmap PRIVATE src tools)
 # --- Tool: Cloud Generator ---
 add_executable(generate_clouds tools/CloudGenerator.cpp)
 target_include_directories(generate_clouds PRIVATE src tools)
+
+# --- Tool: 3D Noise Generator ---
+add_executable(generate_noise3d tools/Generate3DNoise.cpp)
+target_include_directories(generate_noise3d PRIVATE src tools)
