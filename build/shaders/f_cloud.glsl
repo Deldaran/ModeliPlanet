@@ -57,35 +57,19 @@ float sampleCloudDensity(vec3 p) {
     vec3 weatherPos = p * 0.00004 + vec3(time * 0.000005, 0.0, 0.0); 
     float bigWeather = texture(noiseTexture3D, weatherPos).r;
     
-    // --- SIMULATION DES BANDES CLIMATIQUES (Earth-like Winds) ---
-    vec3 pDir = normalize(p - planetCenter);
-    float lat = abs(pDir.y); // Latitude (0=Equateur, 1=Pole)
-
-    // 1. Zone ITCZ (Equateur): Très dense, cumulonimbus constants
-    float bandEquator = smoothstep(0.20, 0.0, lat); 
-
-    // 2. Zone Temperée (45°-65°): Perturbations frequentes
-    float bandTemperate = smoothstep(0.35, 0.50, lat) * smoothstep(0.80, 0.60, lat);
-
-    // 3. Calottes Polaires (>80°): Nuages fins
-    float bandPolar = smoothstep(0.85, 1.0, lat);
-    
-    // Carte de probabilité climatique (1.0 = Zone Nuageuse, 0.0 = Zone aride)
-    float climateZone = max(bandEquator, max(bandTemperate, bandPolar));
-
-    // Echelle 2 : Moyenne fréquence (Pour préserver les détails "Flight Sim")
+    // Echelle 2 : Moyenne fréquence (Pour créer des "vaguelettes" et briser les blocs)
     vec3 breakupPos = p * 0.00015 + vec3(time * 0.00001, 0.0, 0.0);
-    float breakupNoise = texture(noiseTexture3D, breakupPos).g; 
+    float breakupNoise = texture(noiseTexture3D, breakupPos).g; // Canal Vert
     
-    // CORRECTION CRITIQUE : 
-    // Au lieu d'additionner (ce qui fait des murs blancs), on utilise la zone pour MODULER le seuil.
-    // Zone vide -> Seuil Haut (0.55) -> Difficile de faire un nuage
-    // Zone Equator -> Seuil Bas (0.25) -> Facile, mais le bruit reste maitre de la forme !
+    // On sculpte la météo : Grand nuage - (Moyen Bruit * 0.3)
+    float compositeWeather = bigWeather - (breakupNoise * 0.30); // Reduit l'erosion (etait 0.35)
     
-    float compositeWeather = bigWeather - (breakupNoise * 0.40); // Erosion rétablie forte pour le détail
+    // RETOUR A LA DISTRIBUTION UNIFORME (Sans bandes)
+    // Seuil de 0.25 : Pas trop vide, pas trop plein.
+    float weatherCoverage = smoothstep(0.25, 0.85, compositeWeather);
     
-    float localThreshold = mix(0.55, 0.25, climateZone);
-    float weatherCoverage = smoothstep(localThreshold, localThreshold + 0.3, compositeWeather);
+    // Boost de couverture pour faire "gonfler" les nuages existants
+    weatherCoverage = clamp(weatherCoverage * 1.35, 0.0, 1.0);
     
     if (weatherCoverage < 0.01) return 0.0;
 

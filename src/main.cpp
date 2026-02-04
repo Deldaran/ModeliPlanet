@@ -26,6 +26,13 @@ unsigned int lineVAO, lineVBO;
 bool wireframeMode = false; 
 bool pKeyPressed = false;
 
+// Time Control
+float timeScale = 1.0f;
+double simulatedTime = 0.0; 
+bool tKeyPressed = false;
+bool gKeyPressed = false;
+bool rKeyPressed = false;
+
 // Paramètres de l'univers
 // Unité du joueur (1.0f)
 float playerUnit = 1.0f; // taille de l'entité (1f)
@@ -101,6 +108,32 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
 void processInput(GLFWwindow *window, glm::vec3 terrePos) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) glfwSetWindowShouldClose(window, true);
 
+    // Time Scale Controls
+    // T: Accelerate
+    if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS && !tKeyPressed) {
+        timeScale *= 2.0f;
+        std::cout << "Time Scale: " << timeScale << "x" << std::endl;
+        tKeyPressed = true;
+    }
+    if (glfwGetKey(window, GLFW_KEY_T) == GLFW_RELEASE) tKeyPressed = false;
+
+    // G: Decelerate
+    if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS && !gKeyPressed) {
+        timeScale *= 0.5f;
+        if(timeScale < 0.01f) timeScale = 0.01f;
+        std::cout << "Time Scale: " << timeScale << "x" << std::endl;
+        gKeyPressed = true;
+    }
+    if (glfwGetKey(window, GLFW_KEY_G) == GLFW_RELEASE) gKeyPressed = false;
+    
+    // R: Reset
+    if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS && !rKeyPressed) {
+        timeScale = 1.0f;
+        std::cout << "Time Scale: 1.0x" << std::endl;
+        rKeyPressed = true;
+    }
+    if (glfwGetKey(window, GLFW_KEY_R) == GLFW_RELEASE) rKeyPressed = false;
+
     if (thirdPerson) {
         // --- CONTROLES PHYSIQUES (RCS / JETPACK) ---
         // On n'affecte plus la position, mais on applique une FORCE
@@ -135,13 +168,14 @@ void processInput(GLFWwindow *window, glm::vec3 terrePos) {
         // Ajouter cette force à l'accumulateur global
         ironmanForce += inputForce;
         
-        // Stabilisateur d'inertie (SAS) : Si on n'appuie sur rien, on freine un peu ("Friction de l'air" ou SAS actif)
-        // Pour simuler le vide spatial "vrai", mettre le facteur de freinage très bas (0.01f)
-        // Pour un gameplay jouable, mettre plus haut (0.5f - 2.0f)
+        // Stabilisateur d'inertie (SAS) : DESACTIVÉ pour ORBITE PURE
+        // Si on veut une orbite realiste, on ne doit pas freiner quand on lache les touches
+        /*
         float sasFactor = 1.0f; 
         if (glm::length(inputForce) < 0.1f) {
             ironmanForce -= ironmanVelocity * sasFactor;
         }
+        */
 
      /* Code clean-up: ancienne logique supprimee */
     } else {
@@ -375,7 +409,16 @@ int main() {
     // Spawn Player near Planet Surface (at time = 0)
     // Planet start pos at t=0 is (0, 0, planetDistance)
     glm::vec3 startPlanetPos = glm::vec3(0.0f, 0.0f, planetDistance);
-    ironmanPos = startPlanetPos + glm::vec3(0.0f, TerreRadius + 5.0f, 0.0f);
+    
+    // POSITION DE DEPART: EN ORBITE (HAUTE ALTITUDE)
+    // Au lieu de 5.0f (Sol), on met 300.0f (Espace/Haute Atmosphère)
+    ironmanPos = startPlanetPos + glm::vec3(0.0f, TerreRadius + 300.0f, 0.0f);
+    
+    // VITESSE ORBITALE INITIALE
+    // Pour éviter de tomber comme une pierre, on donne une vitesse tangentielle
+    // V = sqrt(GM / R) approx 87.0f pour R=1300
+    ironmanVelocity = glm::vec3(87.0f, 0.0f, 0.0f);
+    
     lastPlanetPos = startPlanetPos;
     
     // Reset camera too
@@ -394,9 +437,14 @@ int main() {
     }
 
     while (!glfwWindowShouldClose(window)) {
-        float currentFrame = glfwGetTime();
-        deltaTime = currentFrame - lastFrame;
-        lastFrame = currentFrame;
+        float currentFrameReal = glfwGetTime();
+        deltaTime = currentFrameReal - lastFrame;
+        lastFrame = currentFrameReal;
+        
+        // Time Scale Logic
+        simulatedTime += deltaTime * timeScale;
+        float currentFrame = (float)simulatedTime;
+        float dtSim = deltaTime * timeScale;
 
         glm::vec3 terrePos = glm::vec3(
             sin(currentFrame * planetAngularSpeed) * planetDistance, 
@@ -426,8 +474,10 @@ int main() {
         // Simplification: On prend distToPlanet - TerreRadius pour l'altitude grossiere pour le drag
         // Atmosphère finit vers 140-200 unités
         float altitude = distToPlanet - TerreRadius;
-        float atmosphereHeight = 200.0f; 
+        // float atmosphereHeight = 200.0f; 
         
+        // SYSTEME DE DRAG DESACTIVÉ (Pour orbite pure sans ralentissement)
+        /*
         if (altitude < atmosphereHeight) {
             // Densité lineaire (1 au sol, 0 en espace)
             float density = 1.0f - glm::clamp(altitude / atmosphereHeight, 0.0f, 1.0f);
@@ -440,15 +490,16 @@ int main() {
             glm::vec3 dragForce = -ironmanVelocity * density * dragFactor;
             ironmanForce += dragForce;
         }
+        */
 
         // Integration Vitesse : V += (a_grav + a_thrust) * dt
         glm::vec3 acceleration = gravityDir * gravityAccel;
         acceleration += ironmanForce / ironmanMass; // Thrust
         
-        ironmanVelocity += acceleration * deltaTime;
+        ironmanVelocity += acceleration * dtSim;
 
         // Integration Position : P += V * dt
-        ironmanPos += ironmanVelocity * deltaTime;
+        ironmanPos += ironmanVelocity * dtSim;
 
         // Reset inputs
         ironmanForce = glm::vec3(0.0f);
@@ -663,7 +714,7 @@ int main() {
         float cloudOffset = (currentFrame * 0.0001f) / (2.0f * 3.14159265f);
         shaderPlanete.setFloat("cloudRotationOffset", cloudOffset);
         shaderPlanete.setVec3("planetCenter", terrePos);
-        shaderPlanete.setFloat("time", (float)glfwGetTime());
+        shaderPlanete.setFloat("time", currentFrame);
 
         terre.draw();
 
@@ -751,7 +802,7 @@ int main() {
             shaderNuages.setVec3("lightPos", sunPos); 
             shaderNuages.setVec3("viewPos", camera.Position);
             shaderNuages.setVec3("planetCenter", terrePos);
-            shaderNuages.setFloat("time", (float)glfwGetTime());
+            shaderNuages.setFloat("time", currentFrame);
             
             // SYNCHRONISATION ROTATION
             // Vitesse de rotation ultra-lente pour etre realiste
