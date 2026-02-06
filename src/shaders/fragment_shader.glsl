@@ -9,159 +9,105 @@ in vec4 vFragPosLightSpace;
 
 uniform vec3 lightPos;
 uniform vec3 viewPos;
+uniform vec3 planetCenter;
+uniform float planetRadius;
+uniform float cloudMinHeight;
+uniform float cloudMaxHeight;
+uniform float cloudRotationAngle;
+uniform float time;
+
 uniform sampler2D shadowMap;
 uniform sampler2D planetData;
-uniform sampler2D cloudTexture; 
 uniform sampler3D noiseTexture3D;
-uniform float cloudRotationOffset;
-uniform vec3 planetCenter;
-uniform float time; // Needed for noise animation
 
-float rand(vec2 co){
-    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
-}
-float pNoise(vec2 st) {
-    vec2 i = floor(st);
-    vec2 f = fract(st);
-    float a = rand(i);
-    float b = rand(i + vec2(1.0, 0.0));
-    float c = rand(i + vec2(0.0, 1.0));
-    float d = rand(i + vec2(1.0, 1.0));
-    vec2 u = f*f*(3.0-2.0*f);
-    return mix(a, b, u.x) + (c - a)* u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+const float PI = 3.14159265;
+
+float remap(float x, float a, float b, float c, float d) {
+    return c + (d - c) * (x - a) / (b - a);
 }
 
-float ShadowCalculation(vec4 fragPosLightSpace) {
-    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    projCoords = projCoords * 0.5 + 0.5;
-    float closestDepth = texture(shadowMap, projCoords.xy).r; 
-    float currentDepth = projCoords.z;
-    float bias = max(0.005 * (1.0 - dot(vNormal, normalize(lightPos - vFragPos))), 0.0005);
-    
-    float shadow = 0.0;
-    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
-            float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r; 
-            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;        
-        }    
+vec3 rotateY(vec3 p, float angle) {
+    float s = sin(angle); float c = cos(angle);
+    return vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
+}
+
+float getCloudDensityForShadow(vec3 p) {
+    float driftSpeed = 0.00005; float morphSpeed = 0.00025;
+    vec3 relPos = p - planetCenter;
+    float dist = length(relPos);
+    float hFrac = (dist - (planetRadius + cloudMinHeight)) / (cloudMaxHeight - cloudMinHeight);
+    if(hFrac < 0.0 || hFrac > 1.0) return 0.0;
+
+    float lat = relPos.y / planetRadius;
+    float windSpeed = cloudRotationAngle * (1.0 + cos(lat * PI) * 0.2);
+    vec3 baseRotation = rotateY(relPos, windSpeed);
+    vec3 pFluid = baseRotation + (texture(noiseTexture3D, baseRotation * 0.00005 + time * driftSpeed).rgb * 0.1 * planetRadius * 0.1);
+
+    float moisture = smoothstep(0.4, 0.6, texture(noiseTexture3D, pFluid * 0.000008).r);
+    if (moisture <= 0.01) return 0.0;
+
+    float lifeCycle = texture(noiseTexture3D, pFluid * 0.0001 + time * morphSpeed).b;
+    float threshold = mix(0.4, 0.7, lifeCycle);
+    float density = smoothstep(threshold, threshold + 0.1, texture(noiseTexture3D, pFluid * 0.0004 + vec3(0.0, time * 0.0001, 0.0)).r);
+
+    return density * moisture * smoothstep(0.0, 0.1, hFrac) * smoothstep(1.0, 0.5, hFrac);
+}
+
+float getCloudShadow(vec3 fragPos, vec3 lightDir) {
+    float shadowAcc = 0.0;
+    for(int i = 0; i < 4; i++) {
+        shadowAcc += getCloudDensityForShadow(fragPos + lightDir * (cloudMinHeight + float(i) * (cloudMaxHeight - cloudMinHeight) / 4.0));
     }
-    shadow /= 9.0;
-    if(projCoords.z > 1.0) shadow = 0.0;
-    return shadow;
+    return clamp(shadowAcc * 0.5, 0.0, 0.75);
 }
 
 void main() {
     vec3 norm = normalize(vNormal);
     vec3 lightDir = normalize(lightPos - vFragPos);
-    vec3 viewDir = normalize(viewPos - vFragPos);
-    float shadow = ShadowCalculation(vFragPosLightSpace);
-    
-    // --- OMBRES NUAGES (CAST SHADOWS) ---
-    float cloudAltitude = 120.0;
-    
-    // Direction vers le soleil
-    vec3 L = normalize(lightPos - planetCenter);
     vec3 planetN = normalize(vFragPos - planetCenter);
+    float sunAltitude = dot(planetN, lightDir);
+
+    float cloudShadow = getCloudShadow(vFragPos, lightDir);
     
-    // Parallax simplifiee et stabilisee
-    // On limite l'etirement de l'ombre en clampant le dot product à 0.25
-    // Cela evite que l'ombre ne couvre toute la planete lors des angles rasants (Bug du noir complet)
-    float NdotL = max(dot(planetN, L), 0.25); 
-    float distToCloud = cloudAltitude / NdotL;
-    
-    // Position projetee dans la couche nuageuse
-    vec3 cloudPos = vFragPos + L * distToCloud;
-    
-    // UV Mapping
-    vec3 pRel = cloudPos - planetCenter;
-    vec3 dir = normalize(pRel);
-    vec2 cloudUV = vec2(
-        0.5 + atan(dir.z, dir.x) / (2.0 * 3.14159265),
-        0.5 - asin(dir.y) / 3.14159265
-    );
-    cloudUV.x += cloudRotationOffset; // Sync avec la rotation des nuages
-    
-    // Sampling & Evolution "Naturelle" (Copie exacte de f_cloud.glsl)
-    // 1. Lire la "Carte" (Forme générale des continents nuageux)
-    vec4 cSample = texture(cloudTexture, cloudUV);
-    float mapCoverage = cSample.r * cSample.a; // Support PNG transparent
-    
-    // 2. Lire le "Vent/Chaos" (Bruit 3D qui fait bouger et evoluer les formes)
-    // On utilise les memes coordonnees que le shader de nuages (Vent ralenti x10)
-    vec3 animPos = pRel * 0.0003 + vec3(time * 0.0005, 0.0, 0.0);
-    float lowFreq = texture(noiseTexture3D, animPos).r;
-    
-    float coverage = mapCoverage * mapCoverage; // Simple quadratic falloff
-    
-    float combinedFn = 0.0;
-    // Si pas de nuage sur la carte, on sort direct (Optimisation)
-    if (coverage > 0.1) {
-        // Meme echelle que le nouveau shader de nuages
-        vec3 shapePos = pRel * 0.0003 + vec3(time * 0.00005, 0.0, 0.0);
-        float baseNoise = texture(noiseTexture3D, shapePos).r;
-        
-        // Formule Nubis simplifié pour l'ombre
-        // On seuille le bruit par l'inverse de la coverage
-        float baseCloud = clamp((baseNoise - (1.0 - coverage)) / coverage, 0.0, 1.0);
-        
-        combinedFn = baseCloud;
+    vec3 sunCol = vec3(1.5, 1.4, 1.3);
+    if (sunAltitude < 0.25) {
+        sunCol = mix(vec3(1.6, 0.4, 0.1), sunCol, clamp(remap(sunAltitude, -0.1, 0.25, 0.0, 1.0), 0.0, 1.0));
     }
 
-    // Calcul final de l'ombre
-    float cloudShadow = smoothstep(0.1, 0.6, combinedFn) * 0.8;
-    
-    // Fade Horizon: Reduit l'ombre sur les bords de la planete pour eviter les artefacts
-    cloudShadow *= smoothstep(0.0, 0.3, dot(planetN, L)); // Utilise le vrai dot ici
-    
-    shadow = max(shadow, cloudShadow);
-    
-    float diff = max(dot(norm, lightDir), 0.0);
-
     float heightHD = texture(planetData, vTexCoords).r;
-    float grain = pNoise(vTexCoords * 4000.0); 
-    float a_detailed = heightHD + (grain * 0.02 - 0.01);
+    float grain = texture(noiseTexture3D, vec3(vTexCoords * 15.0, time * 0.01)).r;
+    float a_detailed = heightHD + (grain * 0.015 - 0.007);
 
-    vec3 deepOcean  = vec3(0.005, 0.01, 0.25); 
-    vec3 shallowSea = vec3(0.0, 0.4, 0.6);    
-    vec3 beach      = vec3(0.76, 0.70, 0.50);    
-    vec3 forest     = vec3(0.05, 0.25, 0.05);   
-    vec3 plain      = vec3(0.2, 0.4, 0.15); 
-    vec3 rock       = vec3(0.35, 0.32, 0.30);  
-    vec3 snow       = vec3(0.95, 0.95, 1.0);  
-
+    // --- REINTEGRATION DES BIOMES ORIGINAUX ---
     vec3 color;
-    float specular = 0.0;
-
     if (a_detailed < 0.5) {
-        float t = a_detailed / 0.5; 
-        color = mix(deepOcean, shallowSea, clamp(t * t, 0.0, 1.0));
-        vec3 reflectDir = reflect(-lightDir, norm);
-        float spec = pow(max(dot(viewDir, reflectDir), 0.0), 64.0);
-        color += vec3(0.7) * spec * (1.0 - shadow);
-    } 
-    else {
-        float h = (a_detailed - 0.5) * 2.0; 
-        if (h < 0.03) {
-            color = beach * (0.9 + 0.2 * grain); 
-        } 
+        color = mix(vec3(0.005, 0.01, 0.2), vec3(0.0, 0.35, 0.5), clamp(a_detailed * 2.0, 0.0, 1.0));
+    } else {
+        float h = (a_detailed - 0.5) * 2.0;
+        if (h < 0.03) color = vec3(0.76, 0.70, 0.50); // Beach
         else if (h < 0.35) {
-            float t = smoothstep(0.03, 0.35, h);
-            vec3 vegetation = mix(plain, forest, grain * 0.5 + 0.5); 
-            color = mix(beach, vegetation, t);
-        } 
-        else if (h < 0.65) {
-            float t = smoothstep(0.35, 0.65, h);
-            vec3 rockDetail = rock * (0.8 + 0.4 * grain); 
-            color = mix(forest, rockDetail, t);
-        } 
-        else {
-            float t = smoothstep(0.65, 0.85, h);
-            color = mix(rock, snow, t);
+            color = mix(vec3(0.2, 0.4, 0.15), vec3(0.05, 0.25, 0.05), smoothstep(0.03, 0.35, h)); // Plain/Forest
+        } else if (h < 0.65) {
+            color = mix(vec3(0.05, 0.25, 0.05), vec3(0.35, 0.32, 0.30), smoothstep(0.35, 0.65, h)); // Rock
+        } else {
+            color = mix(vec3(0.35, 0.32, 0.30), vec3(0.95, 0.95, 1.0), smoothstep(0.65, 0.85, h)); // Snow
         }
     }
 
-    vec3 ambient = 0.05 * color;
-    vec3 lighting = (ambient + (1.0 - shadow) * (diff * color + specular));
+    float totalShadow = max(cloudShadow, smoothstep(0.05, -0.05, sunAltitude));
+    vec3 lighting = (0.05 * color) + (1.0 - totalShadow) * (max(dot(norm, lightDir), 0.0) * color * sunCol);
+
+    // BROUILLARD ATMOSPHÉRIQUE (distance seulement)
+    // Léger fog à longue distance pour simuler la diffusion atmosphérique
+    float fragDist = length(viewPos - vFragPos);
+    float camAltitude = length(viewPos - planetCenter) - planetRadius;
+    // Le fog n'apparait que si on est dans l'atmosphère (< 300 unités d'altitude)
+    // et uniquement sur les objets lointains
+    if (camAltitude < 300.0) {
+        float maxFogDist = 800.0 + camAltitude * 5.0; // Plus on est haut, plus on voit loin
+        float fogFactor = smoothstep(maxFogDist * 0.3, maxFogDist, fragDist) * 0.4;
+        vec3 fogColor = vec3(0.55, 0.6, 0.7);
+        lighting = mix(lighting, fogColor, fogFactor);
+    }
     FragColor = vec4(lighting, 1.0);
 }

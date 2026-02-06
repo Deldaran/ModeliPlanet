@@ -46,52 +46,71 @@ float getDensityForCloud(vec3 p, float weather, float hFrac) {
     return mix(stratusHeight, cumulusHeight, smoothstep(0.4, 0.7, weather));
 }
 
+// --- FLUID DOMAIN WARPING (Tourbillons) ---
+// Transforme une position lineaire en position "liquide"
+vec3 getFluidPos(vec3 p, float scale, float warpStrength, float timeSpeed) {
+    // 1. On echantillonne un "Champ de Vecteurs" (Flow Field)
+    // Ce champ bouge lentement dans le temps pour animer les tourbillons
+    // On ajoute un drift en Y et Z pour ne pas tout faire aller a droite
+    vec3 flowCoord = p * (scale * 0.5) + vec3(time * timeSpeed, time * timeSpeed * 0.5, -time * timeSpeed * 0.3);
+    
+    vec4 noiseVal = texture(noiseTexture3D, flowCoord);
+    
+    // Vecteur de direction aléatoire (-1.0 à 1.0)
+    vec3 flowDir = noiseVal.rgb * 2.0 - 1.0;
+    
+    // 2. On tord la position d'origine par ce vecteur
+    // C'est ça qui crée les spirales et les formes organiques
+    vec3 warpedP = p + (flowDir * warpStrength);
+    
+    // 3. On retourne la coordonnée finale mise à l'échelle
+    // On n'ajoute PAS de mouvement linéaire global ici pour éviter l'effet "tapis roulant"
+    return warpedP * scale; 
+}
+
 // Fonction de sculpture principale - MODE FINAL SYSTEMIQUE
 float sampleCloudDensity(vec3 p) {
     float len = length(p - planetCenter);
     float hFrac = (len - (planetRadius + cloudMinHeight)) / (cloudMaxHeight - cloudMinHeight);
     if(hFrac < 0.0 || hFrac > 1.0) return 0.0;
 
-    // --- A. WEATHER MAP (La "carte des pressions") ---
-    // Tres basse frequence, bouge lentement. Pente douce.
-    vec3 weatherPos = p * 0.00004 + vec3(time * 0.000005, 0.0, 0.0); 
+    // --- A. WEATHER MAP (Macro Flow - Grands Tourbillons) ---
+    // Warp très fort (2000.0) pour tordre les continents de nuages
+    // Speed lente
+    vec3 weatherPos = getFluidPos(p, 0.00004, 2000.0, 0.000005); 
     float bigWeather = texture(noiseTexture3D, weatherPos).r;
     
-    // Echelle 2 : Moyenne fréquence (Pour créer des "vaguelettes" et briser les blocs)
-    vec3 breakupPos = p * 0.00015 + vec3(time * 0.00001, 0.0, 0.0);
-    float breakupNoise = texture(noiseTexture3D, breakupPos).g; // Canal Vert
+    // Echelle 2 : Breakup (Turbulences moyennes)
+    vec3 breakupPos = getFluidPos(p, 0.00015, 800.0, 0.00002);
+    float breakupNoise = texture(noiseTexture3D, breakupPos).g; 
     
-    // On sculpte la météo : Grand nuage - (Moyen Bruit * 0.3)
-    float compositeWeather = bigWeather - (breakupNoise * 0.30); // Reduit l'erosion (etait 0.35)
+    // On sculpte la météo
+    float compositeWeather = bigWeather - (breakupNoise * 0.30);
     
-    // RETOUR A LA DISTRIBUTION UNIFORME (Sans bandes)
-    // Seuil de 0.25 : Pas trop vide, pas trop plein.
+    // Seuil
     float weatherCoverage = smoothstep(0.25, 0.85, compositeWeather);
-    
-    // Boost de couverture pour faire "gonfler" les nuages existants
     weatherCoverage = clamp(weatherCoverage * 1.35, 0.0, 1.0);
     
     if (weatherCoverage < 0.01) return 0.0;
 
-    // --- B. MODELISATION DE FORME (Basic Shape) ---
-    // Bruit de forme moyenne fréquence
-    vec3 shapePos = p * 0.0002 + vec3(time * 0.000015, time * -0.000005, 0.0);
+    // --- B. MODELISATION DE FORME (Micro Flow - Volutes) ---
+    // Bruit de forme
+    vec3 shapePos = getFluidPos(p, 0.0002, 400.0, 0.00003);
     vec4 shapeSample = texture(noiseTexture3D, shapePos);
     float shapeFBM = shapeSample.g * 0.625 + shapeSample.b * 0.25 + shapeSample.a * 0.125;
 
     // L'EQUATION DE CROISSANCE :
     // Density = Remap(Noise, 1 - Coverage, 1, 0, 1)
-    // Plus "weatherCoverage" est grand (zone de pluie/densité), plus le nuage grossit et fusionne.
     float baseCloud = remap(shapeFBM, 1.0 - weatherCoverage, 1.0, 0.0, 1.0);
     
-    if (baseCloud <= 0.0) return 0.0;
+    if (baseCloud <= 0.0) return 0.0; // Early exit optimisation
     
-    // --- C. APPLICATION DU TYPE (Stratus vs Cumulus) ---
+    // --- C. APPLICATION DU TYPE ---
     float densityHeightParams = getDensityForCloud(p, weatherCoverage, hFrac);
     baseCloud *= densityHeightParams;
 
     // --- D. EROSION FINE (Le "Vent") ---
-    vec3 detailPos = p * 0.002 + vec3(time * 0.00005, 0.0, 0.0); 
+    vec3 detailPos = getFluidPos(p, 0.002, 50.0, 0.0001); 
     vec3 detailNoise = texture(noiseTexture3D, detailPos).gba;
     float highFreq = detailNoise.r * 0.625 + detailNoise.g * 0.25 + detailNoise.b * 0.125;
     

@@ -1,8 +1,11 @@
 #define NOMINMAX
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -81,6 +84,12 @@ bool cameraTargetPlanet = false; // F3 Mode: Orbit Planet vs Orbit Player
 bool f3Pressed = false;          // Toggle latch
 
 // --- Callbacks ---
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    float zoomSpeed = 2.0f;
+    camOrbitDist -= (float)yoffset * zoomSpeed;
+    if (camOrbitDist < 2.0f) camOrbitDist = 2.0f;
+}
+
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     if (firstMouse) { lastX = xpos; lastY = ypos; firstMouse = false; }
     float xoffset = xpos - lastX;
@@ -251,6 +260,7 @@ int main() {
     if (!window) { glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
     glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetScrollCallback(window, scroll_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     AllocConsole();
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) return -1;
@@ -398,6 +408,39 @@ int main() {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthMap, 0);
     glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // --- SCENE BUFFER (Color + Depth pour Raymarching) ---
+    // On crée un buffer HD pour capturer la géométrie (Montagnes, Planete, Joueur)
+    // Cela nous permettra de lire la profondeur exacte dans le shader de nuages
+    unsigned int sceneFBO;
+    glGenFramebuffers(1, &sceneFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, sceneFBO);
+
+    // 1. Color Texture
+    unsigned int sceneColorTex;
+    glGenTextures(1, &sceneColorTex);
+    glBindTexture(GL_TEXTURE_2D, sceneColorTex);
+    // Taille fixe HD pour le buffer interne
+    int SCR_WIDTH = 1920, SCR_HEIGHT = 1080; 
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sceneColorTex, 0);
+
+    // 2. Depth Texture (LE PLUS IMPORTANT POUR LES NUAGES)
+    unsigned int sceneDepthTex;
+    glGenTextures(1, &sceneDepthTex);
+    glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SCR_WIDTH, SCR_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sceneDepthTex, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "ERREUR::FRAMEBUFFER:: Scene Framebuffer non complet!" << std::endl;
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
 
     std::cout << "--- ENGINE START ---" << std::endl;
     glGenVertexArrays(1, &lineVAO);
@@ -547,46 +590,70 @@ int main() {
         
         lastPlanetPos = terrePos;
 
-        // --- THIRD-PERSON CAMERA ORBIT (KSP Style) ---
+        // --- THIRD-PERSON CAMERA ORBIT (Aligned with Gravity) ---
         if (thirdPerson) {
-             // ZOOM: Speed proportional to distance (logarithmic feel)
-             // Min speed 10, Max speed unlimited?
-             float zoomSpeed = glm::max(10.0f, camOrbitDist * 1.5f);
+             // 1. Calculate Local Up Vector (Gravity Up)
+             glm::vec3 surfaceUp = glm::vec3(0.0f, 1.0f, 0.0f);
              
-             if (glfwGetKey(window, GLFW_KEY_KP_ADD) == GLFW_PRESS) camOrbitDist -= deltaTime * zoomSpeed;
-             if (glfwGetKey(window, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS) camOrbitDist += deltaTime * zoomSpeed;
-             
-             // Min limit only (don't clip inside player)
-             if (camOrbitDist < 2.0f) camOrbitDist = 2.0f;
-             // No Max Limit
+             if (cameraTargetPlanet) {
+                 // In Planet View (Map), Up is World Y (North) for a stable map view
+                 surfaceUp = glm::vec3(0.0f, 1.0f, 0.0f);
+             } else {
+                 // In Player View, Up aligns with Gravity (Planet Center -> Player)
+                 float distForGravity = glm::length(ironmanPos - terrePos);
+                 
+                 // If we are close enough to the planet, Up is away from center
+                 if (distForGravity < (TerreRadius * 5.0f)) {
+                     surfaceUp = glm::normalize(ironmanPos - terrePos);
+                 }
+             }
 
-             // Calcul position camera depuis Angles Orbitaux (Spheric to Cartesian)
+             // 2. Compute Camera Position in Local Space (Yaw/Pitch around the player)
+             // We start with a standard orbit around (0,1,0) then rotate it to align with surfaceUp
              float yaw = glm::radians(camOrbitYaw);
              float pitch = glm::radians(camOrbitPitch);
              
              float hDist = camOrbitDist * cos(pitch);
              float vDist = camOrbitDist * sin(pitch);
              
-             float offsetX = hDist * sin(yaw);
-             float offsetZ = hDist * cos(yaw);
-             float offsetY = vDist;
+             // Local offsets (assuming Y is Up)
+             float lx = hDist * sin(yaw);
+             float ly = vDist;
+             float lz = hDist * cos(yaw);
+             glm::vec3 localOrbitPos = glm::vec3(lx, ly, lz);
+
+             // 3. Create Rotation from World Y (0,1,0) to Surface Up
+             glm::vec3 defaultUp = glm::vec3(0.0f, 1.0f, 0.0f);
+             glm::quat alignmentRotation;
              
-             glm::vec3 orbitPos = glm::vec3(offsetX, offsetY, offsetZ);
+             if (glm::abs(glm::dot(defaultUp, surfaceUp)) > 0.999f) {
+                 // Parallel or anti-parallel (handling singularities)
+                 if (glm::dot(defaultUp, surfaceUp) > 0.0f) 
+                     alignmentRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // Identity
+                 else 
+                     alignmentRotation = glm::angleAxis(glm::radians(180.0f), glm::vec3(1.0f, 0.0f, 0.0f)); // Flip
+             } else {
+                 // Standard From-To rotation
+                 glm::vec3 axis = glm::cross(defaultUp, surfaceUp);
+                 float angle = acos(glm::dot(defaultUp, surfaceUp));
+                 alignmentRotation = glm::angleAxis(angle, glm::normalize(axis));
+             }
+             
+             // Apply rotation to the orbit offset
+             glm::vec3 rotatedOrbitPos = alignmentRotation * localOrbitPos;
 
              // TARGET SELECTION (F3 Toggle)
              glm::vec3 targetPos = cameraTargetPlanet ? terrePos : ironmanPos;
 
-             glm::vec3 potentialCamPos = targetPos + orbitPos;
+             glm::vec3 potentialCamPos = targetPos + rotatedOrbitPos;
 
              // --- COLLISION CAMERA SOL ---
-             // Only check collision if we are close to the planet (to save perf and bugs when far away)
-             // And if we are targeting the player (if targeting planet from far away, we don't collide)
              float distCamCenter = glm::length(potentialCamPos - terrePos);
-             
              if (!cameraTargetPlanet || distCamCenter < (TerreRadius * 1.5f)) {
                  glm::vec3 dirCamCenter = potentialCamPos - terrePos;
-                 glm::vec3 rayCamDesc = glm::normalize(dirCamCenter);
+                 glm::vec3 rayCamDesc = glm::normalize(dirCamCenter); // This is effectively a "Up" at camera pos
                  
+                 // Check height map
                  float camRotAngle = currentFrame * 0.001f;
                  glm::mat4 invRotCam = glm::rotate(glm::mat4(1.0f), -camRotAngle, glm::vec3(0,1,0));
                  glm::vec3 localRayCam = glm::vec3(invRotCam * glm::vec4(rayCamDesc, 0.0f));
@@ -596,16 +663,19 @@ int main() {
                  
                  if (distCamCenter < minCamHeight) {
                      potentialCamPos = terrePos + rayCamDesc * minCamHeight;
-                     // Also correct orbitDist to match the collision
-                     // So we don't "spring back" instantly if we zoom in
-                     camOrbitDist = glm::length(potentialCamPos - targetPos);
+                     // Only adjust distance if we are really pushed, else it feels glitchy
+                     // Optionally update camOrbitDist, or just visual clamp
                  }
              }
 
              camera.Position = potentialCamPos;
              camera.Front = glm::normalize(targetPos - camera.Position);
              
-             camera.Right = glm::normalize(glm::cross(camera.Front, glm::vec3(0.0f, 1.0f, 0.0f)));
+             // Vital: Camera's WorldUp must match the Planet Surface Up for "Head Up" effect
+             camera.WorldUp = surfaceUp;
+             
+             // Recalculate Right/Up vectors based on new WorldUp
+             camera.Right = glm::normalize(glm::cross(camera.Front, camera.WorldUp));
              camera.Up    = glm::normalize(glm::cross(camera.Right, camera.Front));
         }
 
@@ -614,7 +684,7 @@ int main() {
         glfwGetFramebufferSize(window, &width, &height);
         glm::mat4 view = camera.GetViewMatrix();
         // Near plane légèrement augmenté pour reduire Z-fighting au loin
-        glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float)width/(float)height, 0.01f, 2000000.0f);
+        glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float)width/(float)height, 0.1f, 2000000.0f);
 
         // Ombre
         glm::mat4 lightProjection = glm::ortho(-15.0f, 15.0f, -15.0f, 15.0f, 0.1f, 2500.0f);
@@ -637,8 +707,10 @@ int main() {
         terre.draw();
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-        // Final
-        glViewport(0, 0, width, height);
+        // 1. GÉOMÉTRIE PASS (Rendu dans le FBO Scenes)
+        // On capture toute la scène solide dans les textures Color et Depth
+        glBindFramebuffer(GL_FRAMEBUFFER, sceneFBO);
+        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
         glClearColor(0.002f, 0.002f, 0.005f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -710,10 +782,20 @@ int main() {
         glBindTexture(GL_TEXTURE_3D, volumeCloudTex);
         shaderPlanete.setInt("noiseTexture3D", 3);
         
-        // Pass sync vars
-        float cloudOffset = (currentFrame * 0.0001f) / (2.0f * 3.14159265f);
-        shaderPlanete.setFloat("cloudRotationOffset", cloudOffset);
         shaderPlanete.setVec3("planetCenter", terrePos);
+        shaderPlanete.setFloat("planetRadius", TerreRadius);
+        shaderPlanete.setFloat("cloudMinHeight", 90.0f); 
+        shaderPlanete.setFloat("cloudMaxHeight", 230.0f);
+
+        // Synchronisation de la rotation (Essentiel pour que l'ombre suive le nuage)
+        float windSpeed = 0.05f; 
+        shaderPlanete.setFloat("cloudRotationAngle", planetRotAngle * (1.0f + windSpeed));
+
+
+        // Texture de bruit 3D
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_3D, volumeCloudTex);
+        shaderPlanete.setInt("noiseTexture3D", 3);
         shaderPlanete.setFloat("time", currentFrame);
 
         terre.draw();
@@ -746,55 +828,53 @@ int main() {
             shaderModel.setMat4("projection", projection);
             ironmanModel.Draw();
 
+        // 2. COPIE DU RENDU SUR L'ÉCRAN
+        // On détache le FBO et on copie le résultat sur l'écran
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, sceneFBO);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); 
+        glBlitFramebuffer(0, 0, SCR_WIDTH, SCR_HEIGHT, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBlitFramebuffer(0, 0, SCR_WIDTH, SCR_HEIGHT, 0, 0, width, height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+        
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, width, height); 
+
         // --- NUAGES ---
         if (!wireframeMode) {
-             // Transparence : On ne veut pas écrire dans le Z-buffer pour ne pas cacher l'atmosphère derrière
-            glDepthMask(GL_FALSE);
+            // Le shader cloud fait du raymarching : il calcule lui-même la profondeur.
+            // On doit juste s'assurer que la mesh-sphère est visible (culling correct)
+            // et que la transparence fonctionne (blend + depth mask).
             
-            // CORRECTION DOME/CLIPPING & VISIBILITE ESPACE:
-            // Si on est dans l'espace (loins), on dessine les FACES AVANT (pour que le depth test passe DEVANT la planete)
-            // Si on est dans l'atmosphere (dedans), on dessine les FACES ARRIERES (pour voir le volume de l'interieur)
-            float distCam = glm::length(camera.Position - terrePos);
-            // Seuil de transition : Rayon Terre + Max Altitude Nuage + Marge
-            float transitionAlt = TerreRadius + 160.0f; 
+            float distToCenter = glm::length(camera.Position - terrePos);
+            float cloudMeshRadius = TerreRadius * 1.3f; // Rayon de la mesh sphère des nuages (après scale)
             
+            // --- CULLING ---
+            // Si on est DANS la sphère mesh, on voit les back faces (intérieur).
+            // Si on est DEHORS, on voit les front faces (extérieur).
+            // Zone tampon de 50u autour de la surface pour éviter le pop.
             glEnable(GL_CULL_FACE);
-            if (distCam > transitionAlt) { 
-                // ESPACE : Vue exterieure -> On dessine la coque externe
-                glCullFace(GL_BACK);
+            if (abs(distToCenter - cloudMeshRadius) < 50.0f) {
+                glDisable(GL_CULL_FACE); // Les deux côtés pour la transition
+            } else if (distToCenter > cloudMeshRadius) {
+                glCullFace(GL_BACK);  // Vue espace : faces avant
             } else {
-                 // ATMOSPHERE/SOL : Vue interieure -> On dessine la coque interne
-                 // On doit utiliser GL_LESS pour que les montagnes (Planete) cachent les nuages derriere elles.
-                 // Le rayon (Z-Far) est suffisant (2M) pour voir la coque arriere.
-                 glCullFace(GL_FRONT); 
+                glCullFace(GL_FRONT); // Vue intérieure : faces arrière
             }
-                 
-            // Depth Mask False est correct pour la transparence
-            glDepthMask(GL_FALSE);
-            // Depth Test standard (LESS)
-            glDepthFunc(GL_LESS);
-
-            shaderNuages.use();
             
-            // Depth Mask False est correct pour la transparence (pas d'ecriture Z, mais lecture Z active)
+            // --- DEPTH ---
+            // Pas d'écriture dans le Z-buffer (transparence)
             glDepthMask(GL_FALSE);
-
-            shaderNuages.use();
+            
+            // SUPER IMPORTANT : On DÉSACTIVE le Depth Test matériel !
+            // Pourquoi ? Parce que le shader fait son propre Depth Test "logiciel" en lisant la texture de profondeur.
+            // Si on laisse le GL_DEPTH_TEST, la sphère mesh (qui est géométriquement derrière la planète vu d'ici)
+            // est rejetée par le GPU avant même que le shader ne puisse dessiner les nuages devant la planète.
+            glDisable(GL_DEPTH_TEST);
 
             shaderNuages.use();
             
             // Les nuages tournent un peu plus vite que la terre pour simuler le vent
-            glm::mat4 modelNuages = glm::translate(glm::mat4(1.0f), terrePos);
-            // On ne rotate pas le modele sphere nuage ici car le Raymarching gere sa propre rotation/UV
-            // Mais pour que la boite englobante suive... en fait c une sphere parfaite donc la rotation ne change rien a la geometrie
-            // Sauf si on veut que le repere local tourne. 
-            // Pour le raymarching on prefere un repere stable aligné monde ou alors on passe la rotation.
-            // On laisse l'identité (sauf translation)
-            
-            // L'échelle doit couvrir la zone max (Cloud Max Height)
-            // Rayon Terre = 1000. Max Height = 140. Total = 1140. Base sphere ~1012.
-            // Scale 1.15 => ~1163 radius. Suffisant pour englober tout le volume nuageux.
-            modelNuages = glm::scale(modelNuages, glm::vec3(1.16f)); 
+            float cloudRotAngle = planetRotAngle * (1.0f + windSpeed);
+            glm::mat4 modelNuages = glm::scale(glm::translate(glm::mat4(1.0f), terrePos), glm::vec3(1.3f));
 
             shaderNuages.setMat4("model", modelNuages);
             shaderNuages.setMat4("view", view);
@@ -803,21 +883,12 @@ int main() {
             shaderNuages.setVec3("viewPos", camera.Position);
             shaderNuages.setVec3("planetCenter", terrePos);
             shaderNuages.setFloat("time", currentFrame);
-            
-            // SYNCHRONISATION ROTATION
-            // Vitesse de rotation ultra-lente pour etre realiste
-            // 0.00001f au lieu de 0.0001f (10x plus lent)
-            // Correction finale: Valeur infime pour que ca paraisse fixe (pour test)
-            float cloudOffset = (currentFrame * 0.000002f) / (2.0f * 3.14159265f);
-            shaderNuages.setFloat("cloudRotationOffset", cloudOffset);
-            
+            shaderNuages.setFloat("cloudRotationAngle", cloudRotAngle);
             shaderNuages.setFloat("planetRadius", TerreRadius);
-            // On remonte les nuages pour qu'ils ne touchent plus le relief
-            // Relief max = ~0.05 * 1000 = 50. donc on commence a 80
             shaderNuages.setFloat("cloudMinHeight", 90.0f); 
-            shaderNuages.setFloat("cloudMaxHeight", 210.0f); // Altitude max augmentée significativement pour des tours géantes (etait 140)
+            shaderNuages.setFloat("cloudMaxHeight", 230.0f);
 
-             glActiveTexture(GL_TEXTURE0);
+            glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, cloudTexture);
             shaderNuages.setInt("cloudCoverageMap", 0);
 
@@ -825,30 +896,45 @@ int main() {
             glBindTexture(GL_TEXTURE_3D, volumeCloudTex);
             shaderNuages.setInt("noiseTexture3D", 1);
 
-            // Blend Mode : PRE-MULTIPLIED ALPHA (CORRECT VOLUMETRIC)
-            // Use GL_ONE for Source because shader outputs (Color * Alpha).
-            // Use GL_ONE_MINUS_SRC_ALPHA for Destination to let background show through (1 - Alpha).
+            // --- DEPTH READING SETUP ---
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
+            shaderNuages.setInt("depthMap", 4);
+            shaderNuages.setVec2("screenSize", glm::vec2(width, height));
+            shaderNuages.setMat4("invView", glm::inverse(view));
+            shaderNuages.setMat4("invProj", glm::inverse(projection));
+
+            // Blend Mode : PRÉ-MULTIPLIÉ (le shader sort color*alpha, alpha)
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); 
 
             terreNuages.draw();
 
-            // Reset Blend Mode standard
+            // --- RESET ÉTATS ---
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-            // Reset Depth Func standard
+            glEnable(GL_DEPTH_TEST); // On réactive le Depth Test pour le reste (Atmosphère, etc)
             glDepthFunc(GL_LESS);
-
-            glCullFace(GL_BACK); // Rétablir le culling standard
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
             glDepthMask(GL_TRUE);
         }
 
         // Atmo
         if (!wireframeMode) {
             glDepthMask(GL_FALSE);
+            glEnable(GL_DEPTH_TEST); // L'atmosphère doit être occultée par la planète
             
-            // Pareil pour l'Atmosphere : Render Back Faces only pour eviter le clipping
+            // Culling : même logique que les nuages
+            float distAtmoCenter = glm::length(camera.Position - terrePos);
+            float atmoMeshRadius = TerreRadius * 1.25f;
+            
             glEnable(GL_CULL_FACE);
-            glCullFace(GL_FRONT);
+            if (abs(distAtmoCenter - atmoMeshRadius) < 50.0f) {
+                glDisable(GL_CULL_FACE);
+            } else if (distAtmoCenter > atmoMeshRadius) {
+                glCullFace(GL_BACK);
+            } else {
+                glCullFace(GL_FRONT);
+            }
 
             shaderAtmosphere.use();
             glm::mat4 modelAtmo = glm::translate(glm::mat4(1.0f), terrePos);
@@ -868,7 +954,9 @@ int main() {
 
             terreAtmosphere.draw();
             
+            glEnable(GL_CULL_FACE);
             glCullFace(GL_BACK); // Restore standard culling
+            glEnable(GL_DEPTH_TEST);
             glDepthMask(GL_TRUE);
         }
 
